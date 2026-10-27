@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Typeface
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
@@ -45,6 +46,17 @@ class MainActivity : Activity() {
     private val prefs by lazy { getSharedPreferences("fav", MODE_PRIVATE) }
     private val serif: Typeface by lazy { Typeface.create("serif", Typeface.NORMAL) }
 
+    private val iconListener = object : AppRepository.IconListener {
+        override fun onIconLoaded(pkg: String, icon: Drawable) {
+            if (!::grid.isInitialized || drawer.visibility != View.VISIBLE) return
+            for (i in 0 until grid.childCount) {
+                val cell = grid.getChildAt(i) as? LinearLayout ?: continue
+                val image = cell.getChildAt(0) as? ImageView ?: continue
+                if (image.tag == pkg) image.setImageDrawable(icon)
+            }
+        }
+    }
+
     private val packageReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val changed = intent?.data?.schemeSpecificPart
@@ -58,6 +70,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         palette = Themes.of(FreyPrefs.theme(this))
         repo = AppRepository(this)
+        repo.setIconListener(iconListener)
         configureWindow()
         buildUi()
         refreshApps()
@@ -82,6 +95,12 @@ class MainActivity : Activity() {
     override fun onStop() {
         runCatching { unregisterReceiver(packageReceiver) }
         super.onStop()
+    }
+
+    override fun onDestroy() {
+        repo.clearIconListener()
+        repo.close()
+        super.onDestroy()
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -295,9 +314,11 @@ class MainActivity : Activity() {
                 background = panel(palette.surface, palette.border, maxOf(4, palette.radiusDp - 8))
             }
             val app = apps.getOrNull(position) ?: return cell
-            (cell.getChildAt(0) as ImageView).setImageDrawable(
-                repo.icon(app.pkg) ?: packageManager.defaultActivityIcon
-            )
+            val image = cell.getChildAt(0) as ImageView
+            image.tag = app.pkg
+            val cached = repo.cachedIcon(app.pkg)
+            image.setImageDrawable(cached ?: packageManager.defaultActivityIcon)
+            if (cached == null) repo.requestIcon(app.pkg)
             (cell.getChildAt(1) as TextView).apply {
                 text = app.label
                 setTextColor(palette.text)
