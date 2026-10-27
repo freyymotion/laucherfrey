@@ -47,7 +47,8 @@ class MainActivity : Activity() {
 
     private val packageReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            repo.clearIcons()
+            val changed = intent?.data?.schemeSpecificPart
+            if (changed != null) repo.clearIcon(changed) else repo.clearIcons()
             refreshApps()
             showFavs()
         }
@@ -291,9 +292,9 @@ class MainActivity : Activity() {
                 }, LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
                 ))
+                background = panel(palette.surface, palette.border, maxOf(4, palette.radiusDp - 8))
             }
             val app = apps.getOrNull(position) ?: return cell
-            cell.background = panel(palette.surface, palette.border, maxOf(4, palette.radiusDp - 8))
             (cell.getChildAt(0) as ImageView).setImageDrawable(
                 repo.icon(app.pkg) ?: packageManager.defaultActivityIcon
             )

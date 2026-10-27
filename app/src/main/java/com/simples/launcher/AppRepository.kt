@@ -30,6 +30,10 @@ class AppRepository(private val context: Context) {
         return icon
     }
 
+    fun clearIcon(pkg: String) {
+        iconCache.remove(pkg)
+    }
+
     fun clearIcons() {
         iconCache.evictAll()
     }
