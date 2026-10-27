@@ -357,7 +357,7 @@ class MainActivity : Activity() {
                 }
                 toast("Confirme o SimpleLauncher na tela do sistema")
                 val requested = runCatching {
-                    startActivityForResult(roleManager.createIntentForRoleRequest(RoleManager.ROLE_HOME), REQ_ROLE)
+                    startActivityForResult(roleManager.createRequestRoleIntent(RoleManager.ROLE_HOME), REQ_ROLE)
                 }.isSuccess
                 if (requested) return
             }
