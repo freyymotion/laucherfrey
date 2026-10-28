@@ -1,6 +1,8 @@
 package com.simples.launcher
 
 import android.app.Activity
+import android.content.Intent
+import android.net.Uri
 import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -13,6 +15,7 @@ import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 
 class SettingsPanel(
     private val activity: Activity,
@@ -117,6 +120,36 @@ class SettingsPanel(
             setPadding(0, dp(12), 0, 0)
             setOnClickListener { onClearWallpaper() }
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        card.addView(label("Sobre / Desenvolvedor", 12f, palette.textDim).apply {
+            setPadding(0, dp(20), 0, dp(6))
+        })
+
+        card.addView(label("FREYY.MOTION", 18f, palette.text, serif = true).apply {
+            setPadding(0, dp(2), 0, dp(4))
+        })
+
+        card.addView(label(
+            "Launcher Android independente, criado por FREYY.MOTION.",
+            12f, palette.textDim
+        ).apply {
+            setLineSpacing(0f, 1.15f)
+        })
+
+        card.addView(label("Portfólio · freyymotion.github.io", 12f, palette.accent).apply {
+            setPadding(0, dp(10), 0, 0)
+            setOnClickListener {
+                runCatching {
+                    activity.startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse("https://freyymotion.github.io/"))
+                    )
+                }.onFailure {
+                    Toast.makeText(
+                        activity, "Não foi possível abrir o portfólio", Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        })
 
         card.addView(label("Dicas de bateria", 12f, palette.textDim).apply {
             setPadding(0, dp(20), 0, dp(6))

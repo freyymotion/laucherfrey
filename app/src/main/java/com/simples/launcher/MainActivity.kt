@@ -193,6 +193,16 @@ class MainActivity : Activity() {
         setStroke(maxOf(1, dp(1)), stroke)
     }
 
+    private fun drawerBackground(): Drawable =
+        if (FreyPrefs.theme(this) == ThemeId.GLASS) {
+            GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(0xCC090B0F.toInt(), 0xCC171C24.toInt())
+            )
+        } else {
+            background()
+        }
+
     private fun background() = GradientDrawable(
         GradientDrawable.Orientation.TOP_BOTTOM,
         intArrayOf(palette.bgTop, palette.bgBottom)
@@ -635,7 +645,7 @@ class MainActivity : Activity() {
         drawer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(18), dp(20), 0)
-            background = background()
+            background = drawerBackground()
             visibility = View.GONE
         }
 
@@ -1132,11 +1142,21 @@ class MainActivity : Activity() {
         }
         actions.add("Adicionar à pasta" to { addToFolder(pkg) })
         if (canUninstall(pkg)) actions.add("Desinstalar" to { uninstallApp(pkg) })
-        AlertDialog.Builder(this, dialogStyle())
+
+        val dialog = AlertDialog.Builder(this, dialogStyle())
             .setTitle(app.label)
-            .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
+                actions[which].second()
+            }
             .setNegativeButton("Cancelar", null)
-            .show()
+            .create()
+
+        dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(
+                panel(0xF016171B.toInt(), 0xFF41434B.toInt(), 22)
+            )
+        }
+        dialog.show()
     }
 
     private fun openApp(pkg: String) {
