@@ -473,7 +473,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun clearWallpaper() {
+    private fun clearCustomWallpaper() {
         ++wallpaperVersion
         ++previewVersion
 
@@ -1032,7 +1032,7 @@ class MainActivity : Activity() {
             },
             onRequestDefault = { requestDefaultLauncher() },
             onPickWallpaper = { chooseWallpaper() },
-            onClearWallpaper = { clearWallpaper() },
+            onClearWallpaper = { clearCustomWallpaper() },
             onClose = { closeSettings() }
         ).also { panel ->
             settingsHost.removeAllViews()
