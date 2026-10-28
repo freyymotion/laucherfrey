@@ -90,11 +90,21 @@ object Themes {
 object FreyPrefs {
     private const val NAME = "frey"
     private const val KEY_THEME = "theme"
+    private const val KEY_WALLPAPER = "wallpaper"
 
     fun theme(context: Context): ThemeId =
         ThemeId.from(context.getSharedPreferences(NAME, Context.MODE_PRIVATE).getString(KEY_THEME, null))
 
     fun setTheme(context: Context, id: ThemeId) {
         context.getSharedPreferences(NAME, Context.MODE_PRIVATE).edit().putString(KEY_THEME, id.id).apply()
+    }
+
+    fun wallpaper(context: Context): String? =
+        context.getSharedPreferences(NAME, Context.MODE_PRIVATE).getString(KEY_WALLPAPER, null)
+
+    fun setWallpaper(context: Context, path: String?) {
+        val edit = context.getSharedPreferences(NAME, Context.MODE_PRIVATE).edit()
+        if (path.isNullOrEmpty()) edit.remove(KEY_WALLPAPER) else edit.putString(KEY_WALLPAPER, path)
+        edit.apply()
     }
 }

@@ -20,6 +20,8 @@ class SettingsPanel(
     private val current: ThemeId,
     private val onThemeSelected: (ThemeId) -> Unit,
     private val onRequestDefault: () -> Unit,
+    private val onPickWallpaper: () -> Unit,
+    private val onClearWallpaper: () -> Unit,
     private val onClose: () -> Unit
 ) {
 
@@ -44,6 +46,16 @@ class SettingsPanel(
             if (serif) typeface = this@SettingsPanel.serif
             letterSpacing = if (serif) 0.3f else 0f
         }
+
+    private fun tip(title: String, body: String): View = LinearLayout(activity).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(0, dp(12), 0, 0)
+        addView(label(title, 14f, palette.text))
+        addView(label(body, 12f, palette.textDim).apply {
+            setPadding(0, dp(3), 0, 0)
+            setLineSpacing(0f, 1.15f)
+        })
+    }
 
     private fun build(): View {
         val root = FrameLayout(activity).apply {
@@ -88,6 +100,55 @@ class SettingsPanel(
             group.addView(radio)
         }
         card.addView(group)
+
+        card.addView(label("Papel de parede", 12f, palette.textDim).apply {
+            setPadding(0, dp(18), 0, dp(6))
+        })
+
+        card.addView(label("Escolher imagem", 15f, palette.text).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(13), dp(16), dp(13))
+            background = panel(palette.surface, palette.accent, palette.radiusDp - 6)
+            setOnClickListener { onPickWallpaper() }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        card.addView(label("Usar fundo padrão", 13f, palette.textDim).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, dp(12), 0, 0)
+            setOnClickListener { onClearWallpaper() }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        card.addView(label("Dicas de bateria", 12f, palette.textDim).apply {
+            setPadding(0, dp(20), 0, dp(6))
+        })
+
+        card.addView(label(
+            "Não há economia garantida: o consumo depende do aparelho, da tela e do uso. " +
+                "Estas dicas são apenas orientações; o launcher não altera configurações do sistema.",
+            11f, palette.textDim
+        ).apply {
+            setLineSpacing(0f, 1.15f)
+        })
+
+        listOf(
+            "Brilho da tela" to
+                "Reduzir o brilho e usar brilho automático costuma diminuir o consumo, " +
+                "especialmente com a tela ligada por muito tempo. O ganho varia conforme o aparelho e o ambiente.",
+            "Fundos escuros" to
+                "Em telas OLED/AMOLED, pixels pretos podem ficar desligados, então fundos escuros podem ajudar. " +
+                "Em telas LCD, a iluminação de fundo continua acesa e a diferença tende a ser pequena ou nenhuma.",
+            "Aplicativos em segundo plano" to
+                "Revise apps com permissão para rodar em segundo plano, usar localização ou sincronizar dados. " +
+                "Restrinja apenas os que não precisam funcionar o tempo todo; encerrar tudo à força pode aumentar " +
+                "o consumo quando os apps forem reabertos.",
+            "Configurações do sistema" to
+                "Modo economia de bateria, bateria adaptativa e redução de atualizações em segundo plano podem ajudar. " +
+                "Os nomes e caminhos variam conforme o fabricante e a versão do Android."
+        ).forEach { (title, body) ->
+            card.addView(tip(title, body), LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+        }
 
         card.addView(divider, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, dp(1))).apply {
             topMargin = dp(18)

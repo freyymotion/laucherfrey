@@ -1,59 +1,120 @@
 package com.simples.launcher
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.role.RoleManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ApplicationInfo
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.media.ExifInterface
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.MediaStore
 import android.provider.Settings
+import android.text.Editable
+import android.text.InputType
 import android.text.TextUtils
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.InputMethodManager
 import android.widget.BaseAdapter
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.GridView
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.Space
 import android.widget.TextClock
 import android.widget.TextView
 import android.widget.Toast
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
+import java.io.InputStream
+import java.util.UUID
+import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
 
     companion object {
         private const val REQ_ROLE = 501
+        private const val REQ_WALLPAPER = 502
+        private const val WALLPAPER_FILE = "wallpaper.jpg"
     }
 
     private var palette: Palette = Themes.of(ThemeId.DARK)
     private lateinit var repo: AppRepository
     private var apps: List<LauncherApp> = emptyList()
+    private var fullApps: List<LauncherApp> = emptyList()
+    private var folders: MutableList<Folder> = mutableListOf()
+    private var activeFolderId: String? = null
 
     private lateinit var home: LinearLayout
     private lateinit var favBox: LinearLayout
     private lateinit var drawer: LinearLayout
+    private lateinit var root: FrameLayout
+    private lateinit var wallpaperView: ImageView
+    private lateinit var wallpaperScrim: View
     private lateinit var grid: GridView
     private lateinit var settingsHost: FrameLayout
+    private lateinit var searchInput: EditText
+    private lateinit var searchClear: TextView
+    private lateinit var emptyView: TextView
+    private lateinit var folderRow: LinearLayout
     private var gridAdapter: AppGridAdapter? = null
+
+    private val wallpaperExecutor = Executors.newSingleThreadExecutor()
+    private var wallpaperVersion = 0
+    private var previewVersion = 0
+
+    private data class Folder(val id: String, var name: String, val packages: MutableList<String>)
+
+    private val searchHandler = Handler(Looper.getMainLooper())
+    private val searchRunnable = Runnable {
+        applyFilter()
+        if (::grid.isInitialized) grid.setSelection(0)
+    }
 
     private val prefs by lazy { getSharedPreferences("fav", MODE_PRIVATE) }
     private val serif: Typeface by lazy { Typeface.create("serif", Typeface.NORMAL) }
 
     private val iconListener = object : AppRepository.IconListener {
         override fun onIconLoaded(pkg: String, icon: Drawable) {
+            if (!::favBox.isInitialized) return
+            for (i in 0 until favBox.childCount) {
+                val row = favBox.getChildAt(i) as? LinearLayout ?: continue
+                val image = row.getChildAt(0) as? ImageView ?: continue
+                if (image.tag == pkg) image.setImageDrawable(icon)
+            }
             if (!::grid.isInitialized || drawer.visibility != View.VISIBLE) return
             for (i in 0 until grid.childCount) {
                 val cell = grid.getChildAt(i) as? LinearLayout ?: continue
                 val image = cell.getChildAt(0) as? ImageView ?: continue
                 if (image.tag == pkg) image.setImageDrawable(icon)
             }
+        }
+    }
+
+    private val appsListener = object : AppRepository.AppsListener {
+        override fun onAppsLoaded(loaded: List<LauncherApp>) {
+            if (isFinishing || isDestroyed) return
+            fullApps = loaded
+            applyFilter()
         }
     }
 
@@ -70,9 +131,12 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         palette = Themes.of(FreyPrefs.theme(this))
         repo = AppRepository(this)
+        folders = loadFolders()
         repo.setIconListener(iconListener)
+        repo.setAppsListener(appsListener)
         configureWindow()
         buildUi()
+        loadSavedWallpaper()
         refreshApps()
         showFavs()
     }
@@ -98,7 +162,10 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        wallpaperExecutor.shutdown()
+        searchHandler.removeCallbacks(searchRunnable)
         repo.clearIconListener()
+        repo.clearAppsListener()
         repo.close()
         super.onDestroy()
     }
@@ -131,6 +198,327 @@ class MainActivity : Activity() {
         intArrayOf(palette.bgTop, palette.bgBottom)
     )
 
+    private fun chooseWallpaper() {
+        val targets = mutableListOf<Intent>()
+        if (Build.VERSION.SDK_INT >= 33) {
+            targets.add(Intent(MediaStore.ACTION_PICK_IMAGES).setType("image/*"))
+        }
+        targets.add(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "image/*"
+        })
+        for (intent in targets) {
+            if (runCatching { startActivityForResult(intent, REQ_WALLPAPER) }.isSuccess) return
+        }
+        toast("Nenhum seletor de imagens disponível")
+    }
+
+    private fun previewWallpaper(uri: Uri) {
+        val version = ++previewVersion
+        wallpaperExecutor.execute {
+            val decoded = runCatching {
+                decodeBounded { contentResolver.openInputStream(uri) }
+            }.getOrNull()
+            val bitmap = if (decoded == null) null else runCatching {
+                orientWallpaper(uri, decoded)
+            }.getOrDefault(decoded)
+            runOnUiThread {
+                if (isFinishing || isDestroyed || version != previewVersion) {
+                    bitmap?.recycle()
+                    return@runOnUiThread
+                }
+                if (bitmap == null) toast("Não foi possível carregar a imagem")
+                else showWallpaperPreview(bitmap)
+            }
+        }
+    }
+
+    private fun decodeBounded(streamFactory: () -> InputStream?): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        val boundsStream = streamFactory() ?: return null
+        boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = wallpaperSample(bounds.outWidth, bounds.outHeight)
+        }
+        return streamFactory()?.use { BitmapFactory.decodeStream(it, null, options) }
+    }
+
+    private fun wallpaperSample(outWidth: Int, outHeight: Int): Int {
+        val screen = maxOf(
+            resources.displayMetrics.widthPixels,
+            resources.displayMetrics.heightPixels
+        )
+        val maxDim = minOf(screen, 2048)
+        var sample = 1
+        while (outWidth / sample > maxDim || outHeight / sample > maxDim) sample *= 2
+        return sample
+    }
+
+    private fun orientWallpaper(uri: Uri, bitmap: Bitmap): Bitmap {
+        if (Build.VERSION.SDK_INT < 24) return bitmap
+        val orientation = runCatching {
+            contentResolver.openInputStream(uri)?.use {
+                ExifInterface(it).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL
+                )
+            }
+        }.getOrNull() ?: return bitmap
+        val degrees = when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> 90
+            ExifInterface.ORIENTATION_ROTATE_180 -> 180
+            ExifInterface.ORIENTATION_ROTATE_270 -> 270
+            else -> 0
+        }
+        if (degrees == 0) return bitmap
+        val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+        val rotated = runCatching {
+            Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        }.getOrNull()
+        if (rotated != null && rotated !== bitmap) {
+            bitmap.recycle()
+            return rotated
+        }
+        return bitmap
+    }
+
+    private fun showWallpaperPreview(bitmap: Bitmap) {
+        var applied = false
+        val preview = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setImageBitmap(bitmap)
+        }
+        val box = FrameLayout(this).apply {
+            setPadding(dp(16), dp(8), dp(16), 0)
+            addView(preview, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                minOf(dp(360), resources.displayMetrics.heightPixels / 2)
+            ))
+        }
+        val dialog = AlertDialog.Builder(this, dialogStyle())
+            .setTitle("Pré-visualização")
+            .setView(box)
+            .setPositiveButton("Aplicar") { _, _ ->
+                applied = true
+                applyWallpaper(bitmap)
+            }
+            .setNegativeButton("Cancelar", null)
+            .create()
+        dialog.setOnDismissListener {
+            if (!applied) {
+                preview.setImageDrawable(null)
+                if (!bitmap.isRecycled) bitmap.recycle()
+            }
+        }
+        dialog.show()
+    }
+
+    private fun isValidWallpaper(file: File): Boolean {
+        if (!file.isFile || file.length() <= 0L) return false
+        return runCatching {
+            val options = BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
+            BitmapFactory.decodeFile(file.absolutePath, options)
+            options.outWidth > 0 && options.outHeight > 0
+        }.getOrDefault(false)
+    }
+
+    private fun applyWallpaper(bitmap: Bitmap) {
+        val version = ++wallpaperVersion
+
+        wallpaperExecutor.execute {
+            val target = File(filesDir, WALLPAPER_FILE)
+            val temp = File(filesDir, "$WALLPAPER_FILE.tmp")
+            val backup = File(filesDir, "$WALLPAPER_FILE.bak")
+            val backupTemp = File(filesDir, "$WALLPAPER_FILE.bak.tmp")
+
+            var saved = runCatching {
+                FileOutputStream(temp).use { out ->
+                    val compressed = bitmap.compress(
+                        Bitmap.CompressFormat.JPEG, 92, out
+                    )
+                    out.flush()
+                    compressed && temp.length() > 0L
+                }
+            }.getOrDefault(false)
+
+            if (saved && isValidWallpaper(target)) {
+                val copied = runCatching {
+                    target.inputStream().use { input ->
+                        backupTemp.outputStream().use { output ->
+                            input.copyTo(output)
+                            output.flush()
+                        }
+                    }
+                    isValidWallpaper(backupTemp)
+                }.getOrDefault(false)
+
+                if (!copied) {
+                    saved = false
+                } else if (backup.exists() && !backup.delete()) {
+                    saved = false
+                } else if (!backupTemp.renameTo(backup)) {
+                    saved = false
+                } else if (!target.delete()) {
+                    saved = false
+                }
+            } else if (saved && target.exists()) {
+                // Não substitui um backup válido por uma imagem inválida.
+                if (!target.delete()) saved = false
+            }
+
+            if (saved && !temp.renameTo(target)) {
+                saved = false
+            }
+
+            // Se a instalação falhar, tenta recuperar a imagem anterior.
+            if (!saved && isValidWallpaper(backup) &&
+                !isValidWallpaper(target)
+            ) {
+                runCatching {
+                    backup.copyTo(target, overwrite = true)
+                }
+            }
+
+            if (temp.exists()) temp.delete()
+            if (backupTemp.exists()) backupTemp.delete()
+
+            runOnUiThread {
+                if (isFinishing || isDestroyed || version != wallpaperVersion) {
+                    if (!bitmap.isRecycled) bitmap.recycle()
+                    return@runOnUiThread
+                }
+
+                if (!saved) {
+                    if (!bitmap.isRecycled) bitmap.recycle()
+                    toast("Não foi possível salvar a imagem")
+                    return@runOnUiThread
+                }
+
+                FreyPrefs.setWallpaper(this, target.absolutePath)
+                showWallpaper(bitmap)
+                toast("Papel de parede aplicado")
+            }
+        }
+    }
+
+    private fun loadSavedWallpaper() {
+        val path = FreyPrefs.wallpaper(this)
+        if (path.isNullOrEmpty()) {
+            showDefaultBackground()
+            return
+        }
+
+        val file = File(path)
+        val version = wallpaperVersion
+
+        wallpaperExecutor.execute {
+            var source = file
+
+            if (!isValidWallpaper(source)) {
+                val backup = File(filesDir, "$WALLPAPER_FILE.bak")
+                val restoreTemp = File(filesDir, "$WALLPAPER_FILE.restore.tmp")
+
+                if (isValidWallpaper(backup)) {
+                    val restored = runCatching {
+                        if (restoreTemp.exists()) restoreTemp.delete()
+
+                        backup.copyTo(restoreTemp, overwrite = true)
+
+                        if (!isValidWallpaper(restoreTemp)) {
+                            restoreTemp.delete()
+                            false
+                        } else {
+                            if (file.exists() && !file.delete()) {
+                                restoreTemp.delete()
+                                false
+                            } else {
+                                restoreTemp.renameTo(file)
+                            }
+                        }
+                    }.getOrDefault(false)
+
+                    if (restored && isValidWallpaper(file)) {
+                        source = file
+                    } else {
+                        source = backup
+                    }
+                }
+            }
+
+            val bitmap = if (isValidWallpaper(source)) {
+                runCatching {
+                    decodeBounded { source.inputStream() }
+                }.getOrNull()
+            } else {
+                null
+            }
+
+            runOnUiThread {
+                if (isFinishing || isDestroyed || version != wallpaperVersion) {
+                    bitmap?.recycle()
+                    return@runOnUiThread
+                }
+
+                if (bitmap == null) {
+                    FreyPrefs.setWallpaper(this, null)
+                    showDefaultBackground()
+                } else {
+                    FreyPrefs.setWallpaper(this, source.absolutePath)
+                    showWallpaper(bitmap)
+                }
+            }
+        }
+    }
+
+    private fun clearWallpaper() {
+        ++wallpaperVersion
+        ++previewVersion
+
+        FreyPrefs.setWallpaper(this, null)
+        showDefaultBackground()
+
+        wallpaperExecutor.execute {
+            val files = listOf(
+                File(filesDir, WALLPAPER_FILE),
+                File(filesDir, "$WALLPAPER_FILE.tmp"),
+                File(filesDir, "$WALLPAPER_FILE.bak"),
+                File(filesDir, "$WALLPAPER_FILE.bak.tmp"),
+                File(filesDir, "$WALLPAPER_FILE.restore.tmp")
+            )
+
+            val deleted = files.all { file ->
+                !file.exists() || file.delete()
+            }
+
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) {
+                    if (deleted) {
+                        toast("Fundo padrão restaurado")
+                    } else {
+                        toast("Fundo padrão ativado; alguns arquivos não puderam ser removidos")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun showWallpaper(bitmap: Bitmap) {
+        if (!::wallpaperView.isInitialized) return
+        wallpaperView.setImageBitmap(bitmap)
+        wallpaperView.visibility = View.VISIBLE
+        wallpaperScrim.visibility = View.VISIBLE
+    }
+
+    private fun showDefaultBackground() {
+        if (!::wallpaperView.isInitialized) return
+        wallpaperView.setImageDrawable(null)
+        wallpaperView.visibility = View.GONE
+        wallpaperScrim.visibility = View.GONE
+    }
+
     private fun text(value: String, size: Float, color: Int) = TextView(this).apply {
         text = value
         textSize = size
@@ -161,7 +549,25 @@ class MainActivity : Activity() {
     }
 
     private fun buildUi() {
-        val root = FrameLayout(this).apply { background = background() }
+        root = FrameLayout(this).apply { background = background() }
+        wallpaperView = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            isClickable = false
+            isFocusable = false
+            visibility = View.GONE
+        }
+        wallpaperScrim = View(this).apply {
+            setBackgroundColor(if (palette.light) 0x99FFFFFF.toInt() else 0x99000000.toInt())
+            isClickable = false
+            isFocusable = false
+            visibility = View.GONE
+        }
+        root.addView(wallpaperView, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        root.addView(wallpaperScrim, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
 
         home = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -256,6 +662,52 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ))
 
+        searchInput = EditText(this).apply {
+            hint = "Pesquisar aplicativos"
+            inputType = InputType.TYPE_CLASS_TEXT
+            setSingleLine()
+            textSize = 14f
+            setTextColor(palette.text)
+            setHintTextColor(palette.textDim)
+            background = panel(palette.surface, palette.border, maxOf(6, palette.radiusDp - 8))
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+        searchClear = text("Limpar", 11f, palette.accent).apply {
+            setPadding(dp(10), dp(10), 0, dp(10))
+            visibility = View.GONE
+            setOnClickListener { searchInput.setText("") }
+        }
+        searchInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                searchClear.visibility = if (s.isNullOrEmpty()) View.GONE else View.VISIBLE
+                searchHandler.removeCallbacks(searchRunnable)
+                searchHandler.postDelayed(searchRunnable, 120)
+            }
+        })
+        val searchRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        searchRow.addView(searchInput, LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+        ))
+        searchRow.addView(searchClear)
+        drawer.addView(searchRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(12) })
+
+        val folderScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        folderRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        folderScroll.addView(folderRow, ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+        drawer.addView(folderScroll, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(10) })
+        refreshFolderBar()
+
         grid = GridView(this).apply {
             numColumns = maxOf(3, resources.displayMetrics.widthPixels / dp(88))
             horizontalSpacing = dp(6)
@@ -266,14 +718,25 @@ class MainActivity : Activity() {
             adapter = AppGridAdapter().also { gridAdapter = it }
             setOnItemClickListener { _, _, position, _ ->
                 val pkg = apps.getOrNull(position)?.pkg ?: return@setOnItemClickListener
-                if (!repo.launch(pkg)) toast("Não foi possível abrir este app")
+                openApp(pkg)
             }
             setOnItemLongClickListener { _, _, position, _ ->
-                apps.getOrNull(position)?.let { toggleFav(it.pkg) }
+                apps.getOrNull(position)?.let { showAppMenu(it) }
                 true
             }
         }
-        drawer.addView(grid, LinearLayout.LayoutParams(
+        emptyView = text("Nenhum aplicativo", 14f, palette.textDim).apply {
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+        }
+        val gridHost = FrameLayout(this)
+        gridHost.addView(grid, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        gridHost.addView(emptyView, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        drawer.addView(gridHost, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
         ))
 
@@ -328,8 +791,217 @@ class MainActivity : Activity() {
     }
 
     private fun refreshApps() {
-        apps = repo.load()
+        repo.requestApps()
+    }
+
+    private fun applyFilter() {
+        val query = if (::searchInput.isInitialized) searchInput.text.toString().trim().lowercase() else ""
+        val folder = folders.firstOrNull { it.id == activeFolderId }
+        if (folder == null) activeFolderId = null
+        val base = if (folder == null) fullApps else {
+            val wanted = folder.packages.toHashSet()
+            fullApps.filter { it.pkg in wanted }
+        }
+        apps = if (query.isEmpty()) base else base.filter { it.label.lowercase().contains(query) }
         gridAdapter?.notifyDataSetChanged()
+        if (::emptyView.isInitialized) {
+            emptyView.text = when {
+                query.isNotEmpty() -> "Nenhum app encontrado"
+                folder != null -> "Pasta vazia"
+                else -> "Nenhum aplicativo"
+            }
+            emptyView.visibility = if (apps.isEmpty()) View.VISIBLE else View.GONE
+        }
+    }
+
+    private fun refreshFolderBar() {
+        if (!::folderRow.isInitialized) return
+        folderRow.removeAllViews()
+        folderRow.addView(folderChip("Tudo", activeFolderId == null) {
+            activeFolderId = null
+            refreshFolderBar()
+            applyFilter()
+            grid.setSelection(0)
+        }, chipParams())
+        for (folder in folders) {
+            val chip = folderChip(folder.name, activeFolderId == folder.id) {
+                activeFolderId = folder.id
+                refreshFolderBar()
+                applyFilter()
+                grid.setSelection(0)
+            }
+            chip.setOnLongClickListener { showFolderMenu(folder); true }
+            folderRow.addView(chip, chipParams())
+        }
+        folderRow.addView(folderChip("+ Pasta", false) { createFolder() }, chipParams())
+    }
+
+    private fun chipParams() = LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+    ).apply { rightMargin = dp(8) }
+
+    private fun folderChip(label: String, active: Boolean, onClick: () -> Unit): TextView =
+        text(label, 12f, if (active) palette.accent else palette.textDim).apply {
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            background = panel(
+                palette.surface,
+                if (active) palette.accent else palette.border,
+                maxOf(6, palette.radiusDp - 8)
+            )
+            setOnClickListener { onClick() }
+        }
+
+    private fun dialogStyle() = if (palette.light) {
+        android.R.style.Theme_Material_Light_Dialog_Alert
+    } else {
+        android.R.style.Theme_Material_Dialog_Alert
+    }
+
+    private fun showFolderMenu(folder: Folder) {
+        val actions = arrayOf("Renomear", "Excluir")
+        AlertDialog.Builder(this, dialogStyle())
+            .setTitle(folder.name)
+            .setItems(actions) { _, which ->
+                if (which == 0) renameFolder(folder) else deleteFolder(folder)
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun promptFolderName(title: String, initial: String, onOk: (String) -> Unit) {
+        val input = EditText(this).apply {
+            setText(initial)
+            setSelection(text.length)
+            setSingleLine()
+            textSize = 15f
+            setTextColor(palette.text)
+            setHintTextColor(palette.textDim)
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+        }
+        AlertDialog.Builder(this, dialogStyle())
+            .setTitle(title)
+            .setView(input)
+            .setPositiveButton("OK") { _, _ ->
+                val name = input.text.toString().trim()
+                if (name.isEmpty()) toast("Informe um nome") else onOk(name)
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun createFolder() {
+        promptFolderName("Nova pasta", "") { name ->
+            if (folders.any { it.name.equals(name, ignoreCase = true) }) {
+                toast("Já existe uma pasta com esse nome")
+                return@promptFolderName
+            }
+            folders.add(Folder(UUID.randomUUID().toString(), name, mutableListOf()))
+            saveFolders()
+            refreshFolderBar()
+        }
+    }
+
+    private fun renameFolder(folder: Folder) {
+        promptFolderName("Renomear pasta", folder.name) { name ->
+            if (folders.any { it.id != folder.id && it.name.equals(name, ignoreCase = true) }) {
+                toast("Já existe uma pasta com esse nome")
+                return@promptFolderName
+            }
+            folder.name = name
+            saveFolders()
+            refreshFolderBar()
+        }
+    }
+
+    private fun deleteFolder(folder: Folder) {
+        AlertDialog.Builder(this, dialogStyle())
+            .setTitle("Excluir pasta")
+            .setMessage("Excluir \"${folder.name}\"? Os apps não serão desinstalados.")
+            .setPositiveButton("Excluir") { _, _ ->
+                folders.remove(folder)
+                if (activeFolderId == folder.id) activeFolderId = null
+                saveFolders()
+                refreshFolderBar()
+                applyFilter()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun addToFolder(pkg: String) {
+        if (folders.isEmpty()) {
+            toast("Crie uma pasta primeiro")
+            return
+        }
+        AlertDialog.Builder(this, dialogStyle())
+            .setTitle("Adicionar à pasta")
+            .setItems(folders.map { it.name }.toTypedArray()) { _, which ->
+                val folder = folders[which]
+                if (pkg in folder.packages) {
+                    toast("Este app já está nesta pasta")
+                } else {
+                    folder.packages.add(pkg)
+                    saveFolders()
+                    toast("Adicionado a ${folder.name}")
+                    if (activeFolderId == folder.id) applyFilter()
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun removeFromFolder(folder: Folder, pkg: String) {
+        if (folder.packages.remove(pkg)) {
+            saveFolders()
+            toast("Removido da pasta")
+            applyFilter()
+        }
+    }
+
+    private fun loadFolders(): MutableList<Folder> {
+        val raw = getSharedPreferences("folders", MODE_PRIVATE).getString("data", null)
+            ?: return mutableListOf()
+        return runCatching {
+            val items = JSONArray(raw)
+            val out = mutableListOf<Folder>()
+            for (i in 0 until items.length()) {
+                val item = items.getJSONObject(i)
+                val name = item.optString("name")
+                if (name.isEmpty()) continue
+                val id = item.optString("id").ifEmpty { UUID.randomUUID().toString() }
+                val packages = mutableListOf<String>()
+                val saved = item.optJSONArray("apps") ?: JSONArray()
+                for (j in 0 until saved.length()) {
+                    val pkg = saved.optString(j)
+                    if (pkg.isNotEmpty() && pkg !in packages) packages.add(pkg)
+                }
+                out.add(Folder(id, name, packages))
+            }
+            out
+        }.getOrDefault(mutableListOf())
+    }
+
+    private fun saveFolders() {
+        val items = JSONArray()
+        for (folder in folders) {
+            val item = JSONObject()
+            item.put("id", folder.id)
+            item.put("name", folder.name)
+            val packages = JSONArray()
+            folder.packages.forEach { packages.put(it) }
+            item.put("apps", packages)
+            items.put(item)
+        }
+        getSharedPreferences("folders", MODE_PRIVATE).edit()
+            .putString("data", items.toString()).apply()
+    }
+
+    private fun pruneFolders(installed: Set<String>) {
+        var changed = false
+        for (folder in folders) {
+            if (folder.packages.removeAll { it !in installed }) changed = true
+        }
+        if (changed) saveFolders()
     }
 
     private fun showDrawer() {
@@ -339,6 +1011,11 @@ class MainActivity : Activity() {
     }
 
     private fun showHome() {
+        if (::searchInput.isInitialized) {
+            searchInput.clearFocus()
+            (getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager)
+                ?.hideSoftInputFromWindow(searchInput.windowToken, 0)
+        }
         drawer.visibility = View.GONE
         home.visibility = View.VISIBLE
     }
@@ -354,6 +1031,8 @@ class MainActivity : Activity() {
                 recreate()
             },
             onRequestDefault = { requestDefaultLauncher() },
+            onPickWallpaper = { chooseWallpaper() },
+            onClearWallpaper = { clearWallpaper() },
             onClose = { closeSettings() }
         ).also { panel ->
             settingsHost.removeAllViews()
@@ -397,6 +1076,10 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_WALLPAPER) {
+            if (resultCode == RESULT_OK) data?.data?.let { previewWallpaper(it) }
+            return
+        }
         if (requestCode != REQ_ROLE) return
         if (resultCode == RESULT_OK) {
             toast("SimpleLauncher definido como padrão")
@@ -437,6 +1120,48 @@ class MainActivity : Activity() {
         showFavs()
     }
 
+    private fun showAppMenu(app: LauncherApp) {
+        val pkg = app.pkg
+        val actions = mutableListOf<Pair<String, () -> Unit>>()
+        actions.add("Abrir" to { openApp(pkg) })
+        actions.add("Informações do app" to { openAppInfo(pkg) })
+        actions.add((if (pkg in favs()) "Desfavoritar" else "Favoritar") to { toggleFav(pkg) })
+        val activeFolder = folders.firstOrNull { it.id == activeFolderId }
+        if (activeFolder != null && pkg in activeFolder.packages) {
+            actions.add("Remover da pasta" to { removeFromFolder(activeFolder, pkg) })
+        }
+        actions.add("Adicionar à pasta" to { addToFolder(pkg) })
+        if (canUninstall(pkg)) actions.add("Desinstalar" to { uninstallApp(pkg) })
+        AlertDialog.Builder(this, dialogStyle())
+            .setTitle(app.label)
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun openApp(pkg: String) {
+        if (!repo.launch(pkg)) toast("Não foi possível abrir este app")
+    }
+
+    private fun openAppInfo(pkg: String) {
+        val opened = runCatching {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$pkg")))
+        }.isSuccess
+        if (!opened) toast("Não foi possível abrir as informações")
+    }
+
+    private fun canUninstall(pkg: String): Boolean = runCatching {
+        val flags = packageManager.getApplicationInfo(pkg, 0).flags
+        (flags and (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) == 0
+    }.getOrDefault(false)
+
+    private fun uninstallApp(pkg: String) {
+        val opened = runCatching {
+            startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:$pkg")))
+        }.isSuccess
+        if (!opened) toast("Não foi possível desinstalar")
+    }
+
     private fun showFavs() {
         favBox.removeAllViews()
         var count = 0
@@ -459,7 +1184,10 @@ class MainActivity : Activity() {
                 }
             }
             val icon = ImageView(this).apply {
-                setImageDrawable(repo.icon(pkg) ?: packageManager.defaultActivityIcon)
+                tag = pkg
+                val cached = repo.cachedIcon(pkg)
+                setImageDrawable(cached ?: packageManager.defaultActivityIcon)
+                if (cached == null) repo.requestIcon(pkg)
             }
             row.addView(icon, LinearLayout.LayoutParams(dp(28), dp(28)))
             row.addView(text(label, 15f, palette.text).apply {

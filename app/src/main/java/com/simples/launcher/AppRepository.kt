@@ -18,19 +18,26 @@ class AppRepository(private val context: Context) {
         fun onIconLoaded(pkg: String, icon: Drawable)
     }
 
+    interface AppsListener {
+        fun onAppsLoaded(apps: List<LauncherApp>)
+    }
+
     private val pm = context.packageManager
     private val iconCache = LruCache<String, Drawable>(64)
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val loader: ExecutorService = Executors.newSingleThreadExecutor()
     private val lock = Any()
     private val versions = HashMap<String, Long>()
     private val inFlight = HashMap<String, Long>()
     private val again = HashSet<String>()
     private var epoch = 0L
     private var sequence = 0L
+    private var loadSequence = 0L
     private var closed = false
     private var listener: WeakReference<IconListener>? = null
+    private var appsListener: WeakReference<AppsListener>? = null
 
     fun load(): List<LauncherApp> {
         val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
@@ -51,6 +58,37 @@ class AppRepository(private val context: Context) {
     }
 
     fun cachedIcon(pkg: String): Drawable? = iconCache.get(pkg)
+
+    fun setAppsListener(listener: AppsListener?) {
+        synchronized(lock) { appsListener = listener?.let { WeakReference(it) } }
+    }
+
+    fun clearAppsListener() {
+        synchronized(lock) { appsListener = null }
+    }
+
+    fun requestApps() {
+        var taskId = 0L
+        synchronized(lock) {
+            if (closed) return
+            taskId = ++loadSequence
+        }
+        try {
+            loader.execute(Runnable {
+                val result = runCatching { load() }.getOrNull()
+                if (result != null) {
+                    mainHandler.post {
+                        val target = synchronized(lock) {
+                            if (closed || loadSequence != taskId) null else appsListener?.get()
+                        }
+                        target?.onAppsLoaded(result)
+                    }
+                }
+            })
+        } catch (e: Exception) {
+            // closing or rejected: no callback
+        }
+    }
 
     fun setIconListener(listener: IconListener?) {
         synchronized(lock) { this.listener = listener?.let { WeakReference(it) } }
@@ -152,10 +190,12 @@ class AppRepository(private val context: Context) {
         synchronized(lock) {
             closed = true
             listener = null
+            appsListener = null
             inFlight.clear()
             again.clear()
         }
         executor.shutdownNow()
+        loader.shutdownNow()
     }
 
     fun launch(pkg: String): Boolean {
