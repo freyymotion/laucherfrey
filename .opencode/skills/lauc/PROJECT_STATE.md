@@ -44,4 +44,6 @@ build local bloqueado por ausência de Android SDK.
 - Pendência de commit: `Updates.kt` é novo e não rastreado; precisa ser incluído (`git add`) senão a CI falha.
 - Não testado em aparelho: alias LAUNCHER, primeira abertura/diálogo, 7 toques, diagnósticos e layout.
 - Atualizador ainda não consulta a rede; avaliar permissão INTERNET quando for ativado.
-- Commit `e737088` na main com as mudanças e a skill; push autorizado no mesmo lote. Sem tags/releases.
+- Commits locais `e737088` (mudanças+skill) e `77e67ea` (registro) na main. Sem tags/releases.
+- Push para `origin/main` FALHOU: ambiente sem credenciais GitHub (`could not read Username`; gh sem login).
+- Próximo passo: autenticar (`gh auth login` ou token) e executar `git push origin main`; a CI só roda após o push.
