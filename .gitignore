@@ -7,3 +7,9 @@ local.properties
 .DS_Store
 *.apk
 captures/
+*.jks
+*.keystore
+keystore.properties
+
+# Release signing files
+frey-release.jks.b64

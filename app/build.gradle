@@ -3,6 +3,16 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+def releaseKeystoreFile = System.getenv('RELEASE_KEYSTORE_FILE')
+def releaseKeystorePassword = System.getenv('RELEASE_KEYSTORE_PASSWORD')
+def releaseKeyAlias = System.getenv('RELEASE_KEY_ALIAS')
+def releaseKeyPassword = System.getenv('RELEASE_KEY_PASSWORD')
+def hasReleaseSigning = releaseKeystoreFile &&
+        releaseKeystorePassword &&
+        releaseKeyAlias &&
+        releaseKeyPassword &&
+        file(releaseKeystoreFile).exists()
+
 android {
     namespace 'com.simples.launcher'
     compileSdk 34
@@ -15,6 +25,25 @@ android {
         versionName "1.0"
     }
     buildFeatures { buildConfig true }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile file(releaseKeystoreFile)
+                storePassword releaseKeystorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17

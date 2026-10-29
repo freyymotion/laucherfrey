@@ -31,19 +31,56 @@ Esses pontos são históricos: confira o código e os commits atuais antes de co
 7. Wallpaper animado otimizado permanece como ideia futura, não autorizado.
 
 ## Última tarefa
-Validação estática do lote anterior (identidade/atalho, primeira abertura, desenvolvedor,
-modo dev com diagnósticos, base do atualizador). Nenhum erro concreto de código encontrado;
-build local bloqueado por ausência de Android SDK.
+Preparação da assinatura segura de release e do build de distribuição.
 
-## Testes e pendências
-- `git diff --check`: OK. Manifesto e workflow (YAML) validados por parser: OK.
-- `gradlew :app:compileDebugKotlin --offline` tentado: falhou apenas por "SDK location not found";
-  Termux não tem Android SDK. JDK 17, Gradle 8.6 e wrapper jar presentes e OK.
-- Revisão estática: alias LAUNCHER aponta para `.MainActivity` exportada; RoleManager só é
-  usado sob `SDK_INT >= 29` (dois pontos); BuildConfig habilitado no módulo app.
-- Pendência de commit: `Updates.kt` é novo e não rastreado; precisa ser incluído (`git add`) senão a CI falha.
-- Não testado em aparelho: alias LAUNCHER, primeira abertura/diálogo, 7 toques, diagnósticos e layout.
+- `app/build.gradle`: signingConfig `release` criado somente se existirem
+  `RELEASE_KEYSTORE_FILE`, `RELEASE_KEYSTORE_PASSWORD`, `RELEASE_KEY_ALIAS` e
+  `RELEASE_KEY_PASSWORD` e o arquivo existir. Sem credenciais, `assembleRelease`
+  gera APK não assinado e `assembleDebug` continua funcionando.
+- `.github/workflows/build.yml`: debug sempre é compilado/upload. Com
+  `RELEASE_KEYSTORE_BASE64` presente, decodifica a keystore temporariamente,
+  compila `assembleRelease`, verifica com `apksigner --print-certs`, envia o
+  artefato `app-release` e só em tag `v*` publica o APK assinado. Publicação de
+  APK debug como release foi removida. Tags com hífen (ex.: `v1.0.0-beta.1`)
+  são marcadas como pré-lançamento; tags sem hífen continuam sendo estáveis.
+- `.gitignore`: ignora `*.jks`, `*.keystore`, `keystore.properties` e
+  `frey-release.jks.b64`. Nenhum segredo foi adicionado ao repositório.
+- `applicationId` permanece `com.simples.launcher`; atualizador não foi alterado.
+- Commit local preparado com os quatro arquivos autorizados; push, secrets
+  restantes e workflow dependem de confirmação.
+- Versão atual: `versionCode 1` / `versionName "1.0"`. Proposta não aplicada:
+  `versionName "1.0.0-beta.1"` com `versionCode 2`.
+
+## Secrets necessários no GitHub
+`RELEASE_KEYSTORE_BASE64`, `RELEASE_KEYSTORE_PASSWORD`, `RELEASE_KEY_ALIAS`,
+`RELEASE_KEY_PASSWORD`.
+
+## Risco de compatibilidade
+Releases anteriores, se instaladas a partir do APK debug, usam assinatura debug.
+A primeira versão assinada com a chave permanente exigirá desinstalação nessas
+instalações (perda de dados), pois o Android não aceita troca de assinatura.
+Não há tags/releases registradas no estado anterior; confirmar antes do primeiro release.
+
+## Validação
+- `git diff --check`: OK. Workflow validado por parser YAML: OK.
+- `gradlew :app:tasks --offline`: OK (build.gradle do app configurou).
+- `gradlew :app:assembleDebug --offline`: falhou só por "SDK location not found"
+  (Termux sem Android SDK); não é erro de configuração do projeto.
+- Validar assinatura antes do release:
+  `apksigner verify --print-certs app/build/outputs/apk/release/app-release.apk`
+  e conferir o SHA-256 do certificado entre builds.
+
+## Auditoria do pré-lançamento
+- `frey-release.jks` e `frey-release.jks.b64` existem no diretório local e são
+  ignorados pelo Git; o conteúdo não foi lido.
+- `RELEASE_KEYSTORE_BASE64` foi configurado no GitHub. Faltam
+  `RELEASE_KEYSTORE_PASSWORD`, `RELEASE_KEY_ALIAS` e `RELEASE_KEY_PASSWORD`,
+  que exigem intervenção manual.
+- Fluxo separado: push/dispatch gera artefato sem publicar; só tag publica, e tag
+  com hífen é pré-lançamento.
+
+## Pendências anteriores
+- `Updates.kt` já está rastreado.
+- Push para `origin/main` ainda não executado; `gh` está autenticado como ADMIN.
 - Atualizador ainda não consulta a rede; avaliar permissão INTERNET quando for ativado.
-- Commits locais `e737088` (mudanças+skill) e `77e67ea` (registro) na main. Sem tags/releases.
-- Push para `origin/main` FALHOU: ambiente sem credenciais GitHub (`could not read Username`; gh sem login).
-- Próximo passo: autenticar (`gh auth login` ou token) e executar `git push origin main`; a CI só roda após o push.
+- Não testado em aparelho: alias LAUNCHER, primeira abertura/diálogo, 7 toques e diagnósticos.
