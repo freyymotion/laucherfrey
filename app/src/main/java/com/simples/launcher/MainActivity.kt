@@ -56,14 +56,20 @@ class MainActivity : Activity() {
         private const val REQ_ROLE = 501
         private const val REQ_WALLPAPER = 502
         private const val WALLPAPER_FILE = "wallpaper.jpg"
+        private const val MODE_FOLDERS = 0
+        private const val MODE_CATEGORIES = 1
+        private const val CATEGORY_NONE = "__uncategorized__"
     }
 
     private var palette: Palette = Themes.of(ThemeId.DARK)
     private lateinit var repo: AppRepository
+    private lateinit var categoryStore: CategoryStore
     private var apps: List<LauncherApp> = emptyList()
     private var fullApps: List<LauncherApp> = emptyList()
     private var folders: MutableList<Folder> = mutableListOf()
     private var activeFolderId: String? = null
+    private var contentMode = MODE_FOLDERS
+    private var activeCategoryId: String? = null
 
     private lateinit var home: LinearLayout
     private lateinit var favBox: LinearLayout
@@ -76,6 +82,7 @@ class MainActivity : Activity() {
     private lateinit var searchInput: EditText
     private lateinit var searchClear: TextView
     private lateinit var emptyView: TextView
+    private lateinit var modeRow: LinearLayout
     private lateinit var folderRow: LinearLayout
     private var gridAdapter: AppGridAdapter? = null
 
@@ -115,6 +122,7 @@ class MainActivity : Activity() {
         override fun onAppsLoaded(loaded: List<LauncherApp>) {
             if (isFinishing || isDestroyed) return
             fullApps = loaded
+            pruneFolders()
             applyFilter()
         }
     }
@@ -132,14 +140,13 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         palette = Themes.of(FreyPrefs.theme(this))
         repo = AppRepository(this)
+        categoryStore = CategoryStore(this)
         folders = loadFolders()
         repo.setIconListener(iconListener)
         repo.setAppsListener(appsListener)
         configureWindow()
         buildUi()
         loadSavedWallpaper()
-        refreshApps()
-        showFavs()
         maybeShowFirstRun()
     }
 
@@ -156,6 +163,8 @@ class MainActivity : Activity() {
         } else {
             registerReceiver(packageReceiver, filter)
         }
+        refreshApps()
+        showFavs()
     }
 
     override fun onStop() {
@@ -674,6 +683,15 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ))
 
+        modeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        drawer.addView(modeRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(12) })
+        refreshModeBar()
+
         searchInput = EditText(this).apply {
             hint = "Pesquisar aplicativos"
             inputType = InputType.TYPE_CLASS_TEXT
@@ -718,7 +736,7 @@ class MainActivity : Activity() {
         drawer.addView(folderScroll, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { topMargin = dp(10) })
-        refreshFolderBar()
+        refreshFilterBar()
 
         grid = GridView(this).apply {
             numColumns = maxOf(3, resources.displayMetrics.widthPixels / dp(88))
@@ -808,17 +826,28 @@ class MainActivity : Activity() {
 
     private fun applyFilter() {
         val query = if (::searchInput.isInitialized) searchInput.text.toString().trim().lowercase() else ""
-        val folder = folders.firstOrNull { it.id == activeFolderId }
-        if (folder == null) activeFolderId = null
-        val base = if (folder == null) fullApps else {
-            val wanted = folder.packages.toHashSet()
-            fullApps.filter { it.pkg in wanted }
+        val folder = if (contentMode == MODE_FOLDERS) {
+            folders.firstOrNull { it.id == activeFolderId }
+        } else {
+            null
+        }
+        if (contentMode == MODE_FOLDERS && folder == null) activeFolderId = null
+        val base = when {
+            contentMode == MODE_CATEGORIES -> categoryApps()
+            folder == null -> fullApps
+            else -> {
+                val wanted = folder.packages.toHashSet()
+                fullApps.filter { it.pkg in wanted }
+            }
         }
         apps = if (query.isEmpty()) base else base.filter { it.label.lowercase().contains(query) }
         gridAdapter?.notifyDataSetChanged()
         if (::emptyView.isInitialized) {
             emptyView.text = when {
                 query.isNotEmpty() -> "Nenhum app encontrado"
+                contentMode == MODE_CATEGORIES && activeCategoryId == CATEGORY_NONE ->
+                    "Nenhum app sem categoria"
+                contentMode == MODE_CATEGORIES && activeCategoryId != null -> "Categoria vazia"
                 folder != null -> "Pasta vazia"
                 else -> "Nenhum aplicativo"
             }
@@ -826,8 +855,32 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun categoryApps(): List<LauncherApp> {
+        if (activeCategoryId == null) return fullApps
+
+        val automaticByPackage = fullApps.associate { app ->
+            app.pkg to AppCategories.classify(
+                app.label,
+                app.pkg,
+                app.platformCategory
+            )
+        }
+        val effectiveByPackage =
+            categoryStore.effectiveCategoryIds(automaticByPackage)
+
+        return fullApps.filter { app ->
+            val effective = effectiveByPackage[app.pkg]
+            if (activeCategoryId == CATEGORY_NONE) effective == null
+            else effective == activeCategoryId
+        }
+    }
+
+    private fun refreshFilterBar() {
+        if (contentMode == MODE_FOLDERS) refreshFolderBar() else refreshCategoryBar()
+    }
+
     private fun refreshFolderBar() {
-        if (!::folderRow.isInitialized) return
+        if (contentMode != MODE_FOLDERS || !::folderRow.isInitialized) return
         folderRow.removeAllViews()
         folderRow.addView(folderChip("Tudo", activeFolderId == null) {
             activeFolderId = null
@@ -846,6 +899,60 @@ class MainActivity : Activity() {
             folderRow.addView(chip, chipParams())
         }
         folderRow.addView(folderChip("+ Pasta", false) { createFolder() }, chipParams())
+    }
+
+    private fun refreshCategoryBar() {
+        if (contentMode != MODE_CATEGORIES || !::folderRow.isInitialized) return
+
+        val categories = categoryStore.allCategories()
+        if (activeCategoryId != null &&
+            activeCategoryId != CATEGORY_NONE &&
+            categories.none { it.id == activeCategoryId }
+        ) {
+            activeCategoryId = null
+        }
+
+        folderRow.removeAllViews()
+        folderRow.addView(folderChip("Tudo", activeCategoryId == null) {
+            activeCategoryId = null
+            refreshCategoryBar()
+            applyFilter()
+            grid.setSelection(0)
+        }, chipParams())
+        for (category in categories) {
+            folderRow.addView(folderChip(category.name, activeCategoryId == category.id) {
+                activeCategoryId = category.id
+                refreshCategoryBar()
+                applyFilter()
+                grid.setSelection(0)
+            }, chipParams())
+        }
+        folderRow.addView(folderChip("Sem categoria", activeCategoryId == CATEGORY_NONE) {
+            activeCategoryId = CATEGORY_NONE
+            refreshCategoryBar()
+            applyFilter()
+            grid.setSelection(0)
+        }, chipParams())
+    }
+
+    private fun refreshModeBar() {
+        if (!::modeRow.isInitialized) return
+        modeRow.removeAllViews()
+        modeRow.addView(folderChip("Pastas", contentMode == MODE_FOLDERS) {
+            setContentMode(MODE_FOLDERS)
+        }, chipParams())
+        modeRow.addView(folderChip("Categorias", contentMode == MODE_CATEGORIES) {
+            setContentMode(MODE_CATEGORIES)
+        }, chipParams())
+    }
+
+    private fun setContentMode(mode: Int) {
+        if (contentMode == mode) return
+        contentMode = mode
+        refreshModeBar()
+        refreshFilterBar()
+        applyFilter()
+        if (::grid.isInitialized) grid.setSelection(0)
     }
 
     private fun chipParams() = LinearLayout.LayoutParams(
@@ -1008,12 +1115,21 @@ class MainActivity : Activity() {
             .putString("data", items.toString()).apply()
     }
 
-    private fun pruneFolders(installed: Set<String>) {
+    private fun pruneFolders() {
         var changed = false
         for (folder in folders) {
-            if (folder.packages.removeAll { it !in installed }) changed = true
+            if (folder.packages.removeAll { !isInstalled(it) }) changed = true
         }
         if (changed) saveFolders()
+    }
+
+    private fun isInstalled(pkg: String): Boolean = try {
+        packageManager.getApplicationInfo(pkg, 0)
+        true
+    } catch (e: PackageManager.NameNotFoundException) {
+        false
+    } catch (e: Exception) {
+        true
     }
 
     private fun showDrawer() {
@@ -1191,7 +1307,12 @@ class MainActivity : Activity() {
         actions.add("Abrir" to { openApp(pkg) })
         actions.add("Informações do app" to { openAppInfo(pkg) })
         actions.add((if (pkg in favs()) "Desfavoritar" else "Favoritar") to { toggleFav(pkg) })
-        val activeFolder = folders.firstOrNull { it.id == activeFolderId }
+        actions.add("Categoria" to { showCategoryPicker(app) })
+        val activeFolder = if (contentMode == MODE_FOLDERS) {
+            folders.firstOrNull { it.id == activeFolderId }
+        } else {
+            null
+        }
         if (activeFolder != null && pkg in activeFolder.packages) {
             actions.add("Remover da pasta" to { removeFromFolder(activeFolder, pkg) })
         }
@@ -1212,6 +1333,34 @@ class MainActivity : Activity() {
             )
         }
         dialog.show()
+    }
+
+    private fun showCategoryPicker(app: LauncherApp) {
+        val categories = categoryStore.allCategories()
+        val labels = categories.map { it.name } + listOf("Sem categoria", "Automática")
+        AlertDialog.Builder(this, dialogStyle())
+            .setTitle("Categoria de ${app.label}")
+            .setItems(labels.toTypedArray()) { _, which ->
+                val applied = when {
+                    which < categories.size ->
+                        categoryStore.setManualCategory(app.pkg, categories[which].id)
+                    which == categories.size ->
+                        categoryStore.setManuallyUncategorized(app.pkg)
+                    else -> {
+                        categoryStore.clearManualCategory(app.pkg)
+                        true
+                    }
+                }
+                if (!applied) {
+                    toast("Não foi possível atualizar a categoria")
+                    return@setItems
+                }
+                toast("Categoria atualizada")
+                applyFilter()
+                if (::grid.isInitialized) grid.setSelection(0)
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
     }
 
     private fun openApp(pkg: String) {
@@ -1239,14 +1388,20 @@ class MainActivity : Activity() {
 
     private fun showFavs() {
         favBox.removeAllViews()
-        var count = 0
-        for (pkg in favs()) {
+        val stored = favs()
+        val valid = mutableListOf<Pair<String, String>>()
+        for (pkg in stored) {
             val label = try {
                 packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
             } catch (e: Exception) {
                 continue
             }
-            count++
+            valid.add(pkg to label)
+            if (valid.size == 5) break
+        }
+        val validPackages = valid.map { it.first }
+        if (validPackages != stored) saveFavs(validPackages)
+        for ((pkg, label) in valid) {
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -1274,7 +1429,7 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = dp(8) })
         }
-        if (count == 0) {
+        if (valid.isEmpty()) {
             favBox.addView(text("Segure um app na lista\npara fixar aqui", 13f, palette.textDim).apply {
                 gravity = Gravity.CENTER
             })

@@ -10,7 +10,11 @@ import java.lang.ref.WeakReference
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-data class LauncherApp(val pkg: String, val label: String)
+data class LauncherApp(
+    val pkg: String,
+    val label: String,
+    val platformCategory: Int? = null
+)
 
 class AppRepository(private val context: Context) {
 
@@ -45,7 +49,14 @@ class AppRepository(private val context: Context) {
             .asSequence()
             .filter { it.activityInfo.packageName != context.packageName }
             .distinctBy { it.activityInfo.packageName }
-            .map { LauncherApp(it.activityInfo.packageName, it.loadLabel(pm).toString()) }
+            .map {
+                val info = it.activityInfo
+                LauncherApp(
+                    info.packageName,
+                    it.loadLabel(pm).toString(),
+                    AppCategories.platformCategoryOf(info.applicationInfo)
+                )
+            }
             .sortedBy { it.label.lowercase() }
             .toList()
     }

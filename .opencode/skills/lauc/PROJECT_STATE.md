@@ -84,3 +84,45 @@ Não há tags/releases registradas no estado anterior; confirmar antes do primei
 - Push para `origin/main` ainda não executado; `gh` está autenticado como ADMIN.
 - Atualizador ainda não consulta a rede; avaliar permissão INTERNET quando for ativado.
 - Não testado em aparelho: alias LAUNCHER, primeira abertura/diálogo, 7 toques e diagnósticos.
+
+## Correção local A1–A3 (não testada em aparelho)
+- A1: `refreshApps()` e `showFavs()` saíram do `onCreate` para o `onStart`; cada retorno ao
+  primeiro plano consulta o PackageManager uma vez, sem receiver novo.
+- A2: `showFavs()` ignora pacotes não instalados, regrava a preferência sem eles, preserva a
+  ordem e limita a cinco favoritos válidos.
+- A3: `appsListener.onAppsLoaded` chama `pruneFolders`; cada pacote é verificado com
+  `PackageManager.getApplicationInfo`, removendo apenas `NameNotFoundException` (não instalado).
+  Outras exceções preservam a referência; pastas vazias e a estrutura são mantidas.
+- Validação: `git diff --check` OK. Compilação não executada: SDK Android ausente no Termux
+  ("SDK location not found").
+
+## Fase 1 — núcleo de categorias (não testada em aparelho)
+- Novo `app/src/main/java/com/simples/launcher/AppCategories.kt`: categorias embutidas com IDs
+  estáveis, categorias personalizadas, `ManualCategory` (atribuída/sem categoria), classificador
+  puro por `ApplicationInfo.category` (API 26+) e palavras-chave, e `CategoryStore` usando
+  `SharedPreferences("app_categories")`.
+- Só escolhas manuais e categorias personalizadas são persistidas; a inferência automática não é
+  gravada. Excluir categoria personalizada converte seus apps em "sem categoria" manual.
+- `folders`, `fav`, `MainActivity`, `AppRepository` e manifesto não foram alterados nesta fase.
+- Validação: `git diff --check` OK; arquivo novo sem espaços/tabs à direita. Sem testes: o projeto
+  não possui fontes/dependências de teste, e o Termux não tem SDK Android nem `kotlinc`.
+- Seletor Pastas | Categorias, chips e integração em `applyFilter`: implementados na Fase 2.
+- Revisão corretiva de `AppCategories.kt`: normalização remove marcas `\p{M}` antes do regex de
+  separadores; `parseCustomCategories` rejeita IDs embutidos, o sentinela e nomes duplicados sem
+  descartar entradas válidas; override manual com ID inexistente cai na automática, sem limpeza.
+  Verificação isolada da normalização (Python) OK; testes Kotlin seguem pendentes (sem infra/SDK).
+
+## Fase 2 — interface de categorias (não testada em aparelho)
+- `AppRepository.LauncherApp` ganhou `platformCategory`, preenchido no carregamento em segundo plano
+  por `AppCategories.platformCategoryOf`; em API <26 fica `null`. Evita consultar o PackageManager
+  a cada redesenho.
+- `MainActivity`: seletor Pastas | Categorias, chips com Tudo, categorias embutidas, personalizadas
+  e Sem categoria; busca combina com o filtro ativo. O modo Pastas mantém `refreshFolderBar` e menus.
+- Menu do app: ação "Categoria" permite escolher categoria existente, Sem categoria ou Automática;
+  a lista é refeita com `applyFilter()` sem reiniciar.
+- Pastas, favoritos e A1–A3 não foram alterados nem migrados.
+- Gestão de categorias (criar/renomear/excluir) ficou fora da UI nesta fase; aparecem no seletor se
+  já existirem via `CategoryStore`.
+- Validação: `git diff --check` OK. Compilação/testes não executados: sem SDK Android e sem `kotlinc`.
+- Pendente: testar em aparelho alternância, busca, categorias vazias, sem categoria, correções
+  manuais e filtro com categorias personalizadas.
