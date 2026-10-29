@@ -91,6 +91,8 @@ object FreyPrefs {
     private const val NAME = "frey"
     private const val KEY_THEME = "theme"
     private const val KEY_WALLPAPER = "wallpaper"
+    private const val KEY_DEV_MODE = "dev_mode"
+    private const val KEY_FIRST_RUN = "first_run_done"
 
     fun theme(context: Context): ThemeId =
         ThemeId.from(context.getSharedPreferences(NAME, Context.MODE_PRIVATE).getString(KEY_THEME, null))
@@ -106,5 +108,21 @@ object FreyPrefs {
         val edit = context.getSharedPreferences(NAME, Context.MODE_PRIVATE).edit()
         if (path.isNullOrEmpty()) edit.remove(KEY_WALLPAPER) else edit.putString(KEY_WALLPAPER, path)
         edit.apply()
+    }
+
+    fun devMode(context: Context): Boolean =
+        context.getSharedPreferences(NAME, Context.MODE_PRIVATE).getBoolean(KEY_DEV_MODE, false)
+
+    fun setDevMode(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(NAME, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_DEV_MODE, enabled).apply()
+    }
+
+    fun firstRunDone(context: Context): Boolean =
+        context.getSharedPreferences(NAME, Context.MODE_PRIVATE).getBoolean(KEY_FIRST_RUN, false)
+
+    fun setFirstRunDone(context: Context) {
+        context.getSharedPreferences(NAME, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_FIRST_RUN, true).apply()
     }
 }

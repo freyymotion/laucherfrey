@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
@@ -139,6 +140,7 @@ class MainActivity : Activity() {
         loadSavedWallpaper()
         refreshApps()
         showFavs()
+        maybeShowFirstRun()
     }
 
     override fun onStart() {
@@ -1035,6 +1037,14 @@ class MainActivity : Activity() {
             activity = this,
             palette = palette,
             current = FreyPrefs.theme(this),
+            versionLabel = "Versão ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+            devMode = FreyPrefs.devMode(this),
+            diagnostics = diagnosticsText(),
+            onDevModeUnlocked = {
+                FreyPrefs.setDevMode(this, true)
+                toast("Modo desenvolvedor ativado")
+                openSettings()
+            },
             onThemeSelected = { theme ->
                 FreyPrefs.setTheme(this, theme)
                 closeSettings()
@@ -1053,6 +1063,51 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun isDefaultLauncher(): Boolean {
+        if (Build.VERSION.SDK_INT >= 29) {
+            val roleManager = getSystemService(RoleManager::class.java)
+            if (roleManager != null && roleManager.isRoleAvailable(RoleManager.ROLE_HOME)) {
+                return roleManager.isRoleHeld(RoleManager.ROLE_HOME)
+            }
+        }
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+        val resolved = packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
+        return resolved?.activityInfo?.packageName == packageName
+    }
+
+    private fun maybeShowFirstRun() {
+        if (FreyPrefs.firstRunDone(this) || isDefaultLauncher()) return
+        AlertDialog.Builder(this, dialogStyle())
+            .setTitle("Bem-vindo ao FREY")
+            .setMessage(
+                "Para usar o FREY como tela inicial, defina-o como launcher padrão. " +
+                    "O Android vai pedir a sua confirmação."
+            )
+            .setPositiveButton("Definir agora") { _, _ -> requestDefaultLauncher() }
+            .setNegativeButton("Agora não", null)
+            .setOnDismissListener { FreyPrefs.setFirstRunDone(this) }
+            .show()
+    }
+
+    private fun diagnosticsText(): String {
+        val metrics = resources.displayMetrics
+        return buildString {
+            appendLine("FREY ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+            appendLine("Pacote: $packageName")
+            appendLine("Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+            appendLine("Aparelho: ${Build.MANUFACTURER} ${Build.MODEL}")
+            appendLine("ABI: ${Build.SUPPORTED_ABIS.joinToString()}")
+            appendLine("Tela: ${metrics.widthPixels}x${metrics.heightPixels} @ ${metrics.density}")
+            appendLine("Launcher padrão: ${if (isDefaultLauncher()) "sim" else "não"}")
+            appendLine("Tema: ${FreyPrefs.theme(this@MainActivity).label}")
+            appendLine(
+                "Papel de parede: " +
+                    if (FreyPrefs.wallpaper(this@MainActivity).isNullOrEmpty()) "padrão" else "personalizado"
+            )
+            append("Atualizações: ${Updates.REPO} (GitHub Releases)")
+        }
+    }
+
     private fun closeSettings() {
         settingsHost.visibility = View.GONE
         settingsHost.removeAllViews()
@@ -1063,10 +1118,10 @@ class MainActivity : Activity() {
             val roleManager = getSystemService(RoleManager::class.java)
             if (roleManager != null && roleManager.isRoleAvailable(RoleManager.ROLE_HOME)) {
                 if (roleManager.isRoleHeld(RoleManager.ROLE_HOME)) {
-                    toast("SimpleLauncher já é o launcher padrão")
+                    toast("FREY já é o launcher padrão")
                     return
                 }
-                toast("Confirme o SimpleLauncher na tela do sistema")
+                toast("Confirme o FREY na tela do sistema")
                 val requested = runCatching {
                     startActivityForResult(roleManager.createRequestRoleIntent(RoleManager.ROLE_HOME), REQ_ROLE)
                 }.isSuccess
@@ -1077,7 +1132,7 @@ class MainActivity : Activity() {
     }
 
     private fun openHomeSettings() {
-        toast("Escolha o SimpleLauncher na tela do sistema")
+        toast("Escolha o FREY na tela do sistema")
         val opened = runCatching { startActivity(Intent(Settings.ACTION_HOME_SETTINGS)) }.isSuccess
         if (!opened) {
             runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }
@@ -1092,7 +1147,7 @@ class MainActivity : Activity() {
         }
         if (requestCode != REQ_ROLE) return
         if (resultCode == RESULT_OK) {
-            toast("SimpleLauncher definido como padrão")
+            toast("FREY definido como padrão")
             return
         }
         val held = if (Build.VERSION.SDK_INT >= 29) {
@@ -1100,7 +1155,7 @@ class MainActivity : Activity() {
         } else {
             false
         }
-        toast(if (held) "SimpleLauncher é o launcher padrão" else "Seleção não concluída. Use os Ajustes do sistema.")
+        toast(if (held) "FREY é o launcher padrão" else "Seleção não concluída. Use os Ajustes do sistema.")
     }
 
     private fun favs(): MutableList<String> =

@@ -21,6 +21,10 @@ class SettingsPanel(
     private val activity: Activity,
     private val palette: Palette,
     private val current: ThemeId,
+    private val versionLabel: String,
+    private val devMode: Boolean,
+    private val diagnostics: String,
+    private val onDevModeUnlocked: () -> Unit,
     private val onThemeSelected: (ThemeId) -> Unit,
     private val onRequestDefault: () -> Unit,
     private val onPickWallpaper: () -> Unit,
@@ -31,6 +35,7 @@ class SettingsPanel(
     private val density = activity.resources.displayMetrics.density
     private fun dp(v: Int) = (v * density).toInt()
     private val serif: Typeface = Typeface.create("serif", Typeface.NORMAL)
+    private var versionTaps = 0
 
     val view: View = build()
 
@@ -79,6 +84,22 @@ class SettingsPanel(
         card.addView(label("Ajustes", 24f, palette.text, serif = true).apply {
             setPadding(0, dp(6), 0, 0)
         })
+        card.addView(label(versionLabel, 12f, palette.textDim).apply {
+            setPadding(0, dp(4), 0, 0)
+            setOnClickListener {
+                if (devMode) return@setOnClickListener
+                versionTaps++
+                when {
+                    versionTaps >= 7 -> {
+                        versionTaps = 0
+                        onDevModeUnlocked()
+                    }
+                    versionTaps >= 4 -> Toast.makeText(
+                        activity, "Faltam ${7 - versionTaps} toques", Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        })
 
         val divider = View(activity).apply { setBackgroundColor(palette.border) }
 
@@ -121,31 +142,38 @@ class SettingsPanel(
             setOnClickListener { onClearWallpaper() }
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        card.addView(label("Sobre / Desenvolvedor", 12f, palette.textDim).apply {
+        card.addView(label("Desenvolvedor", 12f, palette.textDim).apply {
             setPadding(0, dp(20), 0, dp(6))
         })
 
-        card.addView(label("FREYY.MOTION", 18f, palette.text, serif = true).apply {
+        card.addView(label("FREYY", 18f, palette.text, serif = true).apply {
             setPadding(0, dp(2), 0, dp(4))
         })
 
         card.addView(label(
-            "Launcher Android independente, criado por FREYY.MOTION.",
+            "Launcher Android independente, criado por FREYY.",
             12f, palette.textDim
         ).apply {
             setLineSpacing(0f, 1.15f)
         })
 
-        card.addView(label("Portfólio · freyymotion.github.io", 12f, palette.accent).apply {
-            setPadding(0, dp(10), 0, 0)
+        card.addView(label(
+            "Problemas? Envie uma mensagem no Instagram.",
+            12f, palette.textDim
+        ).apply {
+            setPadding(0, dp(8), 0, 0)
+        })
+
+        card.addView(label("Instagram · @jaofrey_", 12f, palette.accent).apply {
+            setPadding(0, dp(6), 0, 0)
             setOnClickListener {
                 runCatching {
                     activity.startActivity(
-                        Intent(Intent.ACTION_VIEW, Uri.parse("https://freyymotion.github.io/"))
+                        Intent(Intent.ACTION_VIEW, Uri.parse("https://instagram.com/jaofrey_"))
                     )
                 }.onFailure {
                     Toast.makeText(
-                        activity, "Não foi possível abrir o portfólio", Toast.LENGTH_SHORT
+                        activity, "Não foi possível abrir o Instagram", Toast.LENGTH_SHORT
                     ).show()
                 }
             }
@@ -181,6 +209,16 @@ class SettingsPanel(
             card.addView(tip(title, body), LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
             ))
+        }
+
+        if (devMode) {
+            card.addView(label("Diagnósticos", 12f, palette.textDim).apply {
+                setPadding(0, dp(20), 0, dp(6))
+            })
+            card.addView(label(diagnostics, 11f, palette.textDim).apply {
+                typeface = Typeface.MONOSPACE
+                setLineSpacing(0f, 1.2f)
+            })
         }
 
         card.addView(divider, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, dp(1))).apply {
