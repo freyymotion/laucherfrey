@@ -44,4 +44,4 @@ build local bloqueado por ausência de Android SDK.
 - Pendência de commit: `Updates.kt` é novo e não rastreado; precisa ser incluído (`git add`) senão a CI falha.
 - Não testado em aparelho: alias LAUNCHER, primeira abertura/diálogo, 7 toques, diagnósticos e layout.
 - Atualizador ainda não consulta a rede; avaliar permissão INTERNET quando for ativado.
-- Sem commit, push, tag ou release nesta rodada.
+- Commit `e737088` na main com as mudanças e a skill; push autorizado no mesmo lote. Sem tags/releases.
