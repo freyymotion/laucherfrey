@@ -137,14 +137,19 @@ class SettingsPanel(
             setOnClickListener { onPickWallpaper() }
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        card.addView(label("Adicionar GIF", 15f, palette.text).apply {
+        val gifButton = label("Adicionar GIF", 15f, palette.text).apply {
             gravity = Gravity.CENTER
             setPadding(dp(16), dp(13), dp(16), dp(13))
             background = panel(palette.surface, palette.accent, palette.radiusDp - 6)
             setOnClickListener { onPickGif() }
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)).apply {
+        }
+        card.addView(gifButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        val gifButtonContainer = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(gifButton)
             setPadding(0, dp(8), 0, 0)
         }
+        card.addView(gifButtonContainer, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         card.addView(label("Usar fundo padrão", 13f, palette.textDim).apply {
             gravity = Gravity.CENTER

@@ -23,7 +23,14 @@ import android.graphics.drawable.Animatable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.media.ExifInterface
-import android.media.ImageDecoder
+import android.graphics.ImageDecoder
+import android.net.Uri
+import android.os.Build
+import android.graphics.Canvas
+import android.graphics.ColorFilter
+import android.graphics.PixelFormat
+import android.os.BatteryManager
+import android.graphics.drawable.AnimatedImageDrawable
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
@@ -554,7 +561,7 @@ class MainActivity : Activity() {
                 val relTime = elapsed % duration
                 movie.setTime(relTime.toInt())
             }
-            movie.draw(canvas, dst, paint)
+            movie.draw(canvas, dst.left, dst.top, paint)
             
             if (running) {
                 invalidateSelf()
