@@ -1,6 +1,7 @@
 package com.simples.launcher
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.AlertDialog
 import android.app.role.RoleManager
 import android.content.BroadcastReceiver
@@ -17,19 +18,30 @@ import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.media.ExifInterface
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.StatFs
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
+import android.text.Spannable
+import android.text.SpannableString
+import android.text.SpannableStringBuilder
 import android.text.TextUtils
 import android.text.TextWatcher
+import android.text.style.ForegroundColorSpan
+import android.view.GestureDetector
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.view.inputmethod.InputMethodManager
 import android.widget.BaseAdapter
 import android.widget.EditText
@@ -38,6 +50,7 @@ import android.widget.GridView
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.Space
 import android.widget.TextClock
 import android.widget.TextView
@@ -85,6 +98,16 @@ class MainActivity : Activity() {
     private lateinit var modeRow: LinearLayout
     private lateinit var folderRow: LinearLayout
     private var gridAdapter: AppGridAdapter? = null
+    private lateinit var pageIndicator: TextView
+
+    private lateinit var pagesContainer: HorizontalScrollView
+    private lateinit var pagesRow: LinearLayout
+    private lateinit var diagnosticsPage: ScrollView
+    private lateinit var diagnosticsContent: LinearLayout
+    private var currentPage = 0
+    private val diagnosticsHandler = Handler(Looper.getMainLooper())
+    private val diagnosticsUpdateRunnable = Runnable { updateDiagnostics() }
+    private var diagnosticsVisible = false
 
     private val wallpaperExecutor = Executors.newSingleThreadExecutor()
     private var wallpaperVersion = 0
@@ -167,12 +190,31 @@ class MainActivity : Activity() {
         showFavs()
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (::pagesContainer.isInitialized && currentPage == 1) {
+            diagnosticsVisible = true
+            updateDiagnostics()
+            diagnosticsHandler.removeCallbacks(diagnosticsUpdateRunnable)
+            diagnosticsHandler.postDelayed(diagnosticsUpdateRunnable, 2000)
+        }
+    }
+
+    override fun onPause() {
+        diagnosticsHandler.removeCallbacks(diagnosticsUpdateRunnable)
+        diagnosticsVisible = false
+        super.onPause()
+    }
+
     override fun onStop() {
+        diagnosticsHandler.removeCallbacks(diagnosticsUpdateRunnable)
+        diagnosticsVisible = false
         runCatching { unregisterReceiver(packageReceiver) }
         super.onStop()
     }
 
     override fun onDestroy() {
+        diagnosticsHandler.removeCallbacks(diagnosticsUpdateRunnable)
         wallpaperExecutor.shutdown()
         searchHandler.removeCallbacks(searchRunnable)
         repo.clearIconListener()
@@ -192,6 +234,14 @@ class MainActivity : Activity() {
         when {
             settingsHost.visibility == View.VISIBLE -> closeSettings()
             drawer.visibility == View.VISIBLE -> showHome()
+            ::pagesContainer.isInitialized && currentPage == 1 -> {
+                currentPage = 0
+                diagnosticsVisible = false
+                diagnosticsHandler.removeCallbacks(diagnosticsUpdateRunnable)
+                if (::pageIndicator.isInitialized) updatePageIndicator()
+                pagesContainer.smoothScrollTo(0, 0)
+            }
+            else -> super.onBackPressed()
         }
     }
 
@@ -651,7 +701,18 @@ class MainActivity : Activity() {
             background = panel(palette.surface, palette.border, palette.radiusDp - 4)
             setOnClickListener { showDrawer() }
         }
-        home.addView(allApps, wrapWrap(top = dp(20), bottom = dp(4)))
+        home.addView(allApps, wrapWrap(top = dp(20), bottom = dp(10)))
+
+        pageIndicator = TextView(this).apply {
+            textSize = 11f
+            gravity = Gravity.CENTER
+            letterSpacing = 0.05f
+        }
+        home.addView(pageIndicator, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(4) })
+        updatePageIndicator()
 
         drawer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -772,9 +833,64 @@ class MainActivity : Activity() {
 
         settingsHost = FrameLayout(this).apply { visibility = View.GONE }
 
-        root.addView(home, FrameLayout.LayoutParams(
+        buildDiagnosticsPage()
+
+        pagesRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+
+        pagesContainer = object : HorizontalScrollView(this) {
+            private var downX = 0f
+            private var downY = 0f
+
+            override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+                // If overlays are visible, let them handle touches
+                if (settingsHost.visibility == View.VISIBLE || drawer.visibility == View.VISIBLE) {
+                    return false
+                }
+                when (ev.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        downX = ev.x
+                        downY = ev.y
+                        parent?.requestDisallowInterceptTouchEvent(false)
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val dx = Math.abs(ev.x - downX)
+                        val dy = Math.abs(ev.y - downY)
+                        // If vertical movement is stronger, don't intercept (allow vertical scroll in diagnostics)
+                        if (dy > dp(10) && dy > dx * 1.2f) {
+                            parent?.requestDisallowInterceptTouchEvent(true)
+                            return false
+                        }
+                        // If horizontal movement is stronger, intercept for page swipe
+                        if (dx > dp(14) && dx > dy * 1.1f) {
+                            parent?.requestDisallowInterceptTouchEvent(true)
+                            return super.onInterceptTouchEvent(ev)
+                        }
+                    }
+                }
+                return super.onInterceptTouchEvent(ev)
+            }
+
+            override fun onTouchEvent(ev: MotionEvent): Boolean {
+                if (settingsHost.visibility == View.VISIBLE || drawer.visibility == View.VISIBLE) {
+                    return false
+                }
+                return super.onTouchEvent(ev)
+            }
+        }.apply {
+            isHorizontalScrollBarEnabled = false
+            isFillViewport = true
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
+
+        root.addView(pagesContainer, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         ))
+        pagesContainer.addView(pagesRow, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        pagesRow.addView(home, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        pagesRow.addView(diagnosticsPage, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
         root.addView(drawer, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         ))
@@ -782,6 +898,69 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         ))
         setContentView(root)
+
+        pagesContainer.post {
+            val pageWidthPx = pagesContainer.width
+            if (pageWidthPx > 0) {
+                val lpHome = home.layoutParams as? LinearLayout.LayoutParams
+                if (lpHome != null) {
+                    lpHome.width = pageWidthPx
+                    home.layoutParams = lpHome
+                }
+                val lpDiag = diagnosticsPage.layoutParams as? LinearLayout.LayoutParams
+                if (lpDiag != null) {
+                    lpDiag.width = pageWidthPx
+                    diagnosticsPage.layoutParams = lpDiag
+                }
+                pagesRow.requestLayout()
+                val scrollX = if (currentPage == 1) pageWidthPx else 0
+                pagesContainer.scrollTo(scrollX, 0)
+            }
+            updatePageIndicator()
+        }
+
+        pagesContainer.viewTreeObserver.addOnGlobalLayoutListener(object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() {
+                val pageWidthPx = pagesContainer.width
+                if (pageWidthPx > 0) {
+                    val lpHome = home.layoutParams as? LinearLayout.LayoutParams
+                    if (lpHome != null && lpHome.width != pageWidthPx) {
+                        lpHome.width = pageWidthPx
+                        home.layoutParams = lpHome
+                    }
+                    val lpDiag = diagnosticsPage.layoutParams as? LinearLayout.LayoutParams
+                    if (lpDiag != null && lpDiag.width != pageWidthPx) {
+                        lpDiag.width = pageWidthPx
+                        diagnosticsPage.layoutParams = lpDiag
+                    }
+                    pagesRow.requestLayout()
+                    pagesContainer.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                }
+            }
+        })
+
+        pagesContainer.setOnScrollChangeListener { _, scrollX, _, _, _ ->
+            if (settingsHost.visibility == View.VISIBLE || drawer.visibility == View.VISIBLE) {
+                return@setOnScrollChangeListener
+            }
+            val pageWidthPx = pagesContainer.width
+            if (pageWidthPx <= 0) return@setOnScrollChangeListener
+            val newPage = Math.round(scrollX.toFloat() / pageWidthPx.toFloat()).coerceIn(0, 1)
+            if (newPage != currentPage) {
+                currentPage = newPage
+                updatePageIndicator()
+                if (currentPage == 1) {
+                    diagnosticsVisible = true
+                    updateDiagnostics()
+                    diagnosticsHandler.removeCallbacks(diagnosticsUpdateRunnable)
+                    diagnosticsHandler.postDelayed(diagnosticsUpdateRunnable, 2000)
+                } else {
+                    diagnosticsVisible = false
+                    diagnosticsHandler.removeCallbacks(diagnosticsUpdateRunnable)
+                }
+            }
+        }
+    }
     }
 
     private inner class AppGridAdapter : BaseAdapter() {
@@ -1437,4 +1616,289 @@ class MainActivity : Activity() {
     }
 
     private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+
+    private fun buildDiagnosticsPage() {
+        diagnosticsPage = ScrollView(this).apply {
+            isFillViewport = true
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
+        diagnosticsContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(28), dp(24), dp(40))
+        }
+        diagnosticsPage.addView(diagnosticsContent, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val title = TextView(this).apply {
+            text = "Diagnósticos"
+            textSize = 22f
+            setTextColor(0xFFF1F0EC.toInt())
+            typeface = Typeface.create("serif", Typeface.NORMAL)
+            letterSpacing = 0.02f
+        }
+        titleRow.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        val refreshBtn = TextView(this).apply {
+            text = "Atualizar"
+            textSize = 12f
+            setTextColor(0xFFB9A9FF.toInt())
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(10).toFloat()
+                setColor(0x1A6C5CE7.toInt())
+                setStroke(dp(1), 0xFF6C5CE7.toInt())
+            }
+            setOnClickListener {
+                diagnosticsHandler.removeCallbacks(diagnosticsUpdateRunnable)
+                updateDiagnostics()
+                if (currentPage == 1 && isResumed) {
+                    diagnosticsHandler.postDelayed(diagnosticsUpdateRunnable, 2000)
+                }
+            }
+        }
+        titleRow.addView(refreshBtn)
+
+        diagnosticsContent.addView(titleRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(6) })
+
+        val subtitle = TextView(this).apply {
+            text = "Dados reais via APIs Android"
+            textSize = 12f
+            setTextColor(0xFF9A9A9F.toInt())
+        }
+        diagnosticsContent.addView(subtitle, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(18) })
+
+        diagnosticsContent.addView(buildDiagCard("Memória RAM"))
+        diagnosticsContent.addView(buildDiagCard("Bateria"))
+        diagnosticsContent.addView(buildDiagCard("Armazenamento"))
+        diagnosticsContent.addView(buildDiagCard("Tempo de atividade"))
+        diagnosticsContent.addView(buildDiagCard("Sistema avançado"))
+        diagnosticsContent.addView(buildDiagCard("Limitações"))
+
+        updateDiagnostics()
+    }
+
+    private fun buildDiagCard(section: String): LinearLayout {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(16).toFloat()
+                setColor(0xE617181C.toInt())
+                setStroke(dp(1), 0xFF6C5CE7.toInt())
+            }
+        }
+        val header = TextView(this).apply {
+            text = section
+            textSize = 15f
+            setTextColor(0xFFF1F0EC.toInt())
+            typeface = Typeface.create("serif", Typeface.NORMAL)
+        }
+        card.addView(header, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(10) })
+        val body = TextView(this).apply {
+            text = "Carregando..."
+            textSize = 12f
+            setTextColor(0xFFBFB9B3.toInt())
+            setLineSpacing(0f, 1.4f)
+        }
+        body.tag = "diag_body_$section"
+        card.addView(body)
+        card.tag = "diag_card_$section"
+        val lp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+        lp.bottomMargin = dp(12)
+        card.layoutParams = lp
+        return card
+    }
+
+    private fun getDiagBody(section: String): TextView? {
+        val card = diagnosticsContent.findViewWithTag<LinearLayout>("diag_card_$section") ?: return null
+        for (i in 0 until card.childCount) {
+            val v = card.getChildAt(i)
+            if (v.tag == "diag_body_$section" && v is TextView) return v
+        }
+        return null
+    }
+
+    private fun updatePageIndicator() {
+        if (!::pageIndicator.isInitialized) return
+        val homeColor = if (currentPage == 0) 0xFFB9A9FF.toInt() else 0xFF6B6B70.toInt()
+        val diagColor = if (currentPage == 1) 0xFFB9A9FF.toInt() else 0xFF6B6B70.toInt()
+        val spannable = android.text.SpannableStringBuilder()
+        val homePart = android.text.SpannableString("Home")
+        homePart.setSpan(android.text.style.ForegroundColorSpan(homeColor), 0, homePart.length, android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        spannable.append(homePart)
+        spannable.append("  •  ")
+        val diagPart = android.text.SpannableString("Diagnósticos")
+        diagPart.setSpan(android.text.style.ForegroundColorSpan(diagColor), 0, diagPart.length, android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        spannable.append(diagPart)
+        pageIndicator.text = spannable
+    }
+
+    private fun updateDiagnostics() {
+        if (!::diagnosticsContent.isInitialized) return
+        if (!isResumed && !diagnosticsVisible) return
+
+        // Memória RAM
+        val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val mi = ActivityManager.MemoryInfo()
+        am.getMemoryInfo(mi)
+        val ramBody = getDiagBody("Memória RAM")
+        if (mi.totalMem > 0) {
+            val totalGb = mi.totalMem / (1024.0 * 1024.0 * 1024.0)
+            val availGb = mi.availMem / (1024.0 * 1024.0 * 1024.0)
+            val usedGb = totalGb - availGb
+            ramBody?.text = String.format(
+                "Total: %.2f GB\nUsado: %.2f GB\nDisponível: %.2f GB\nBaixa memória: %s",
+                totalGb,
+                usedGb,
+                availGb,
+                if (mi.lowMemory) "Sim" else "Não"
+            )
+        } else {
+            ramBody?.text = "Indisponível\nLimitação: ActivityManager.MemoryInfo.totalMem não disponível nesta API/versão"
+        }
+
+        // Bateria
+        val battBody = getDiagBody("Bateria")
+        val batteryIntent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        if (batteryIntent != null) {
+            val level = batteryIntent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+            val scale = batteryIntent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+            val status = batteryIntent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+            val plugged = batteryIntent.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1)
+            val health = batteryIntent.getIntExtra(BatteryManager.EXTRA_HEALTH, -1)
+            val temp = batteryIntent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1)
+            if (level >= 0 && scale > 0) {
+                val pct = (level * 100.0 / scale).toInt()
+                val statusStr = when (status) {
+                    BatteryManager.BATTERY_STATUS_CHARGING -> "Carregando"
+                    BatteryManager.BATTERY_STATUS_DISCHARGING -> "Descarregando"
+                    BatteryManager.BATTERY_STATUS_FULL -> "Completa"
+                    BatteryManager.BATTERY_STATUS_NOT_CHARGING -> "Não carregando"
+                    else -> "Indefinido"
+                }
+                val pluggedStr = when (plugged) {
+                    BatteryManager.BATTERY_PLUGGED_AC -> "AC"
+                    BatteryManager.BATTERY_PLUGGED_USB -> "USB"
+                    BatteryManager.BATTERY_PLUGGED_WIRELESS -> "Sem fio"
+                    else -> "Desconectado"
+                }
+                val healthStr = when (health) {
+                    BatteryManager.BATTERY_HEALTH_GOOD -> "Boa"
+                    BatteryManager.BATTERY_HEALTH_OVERHEAT -> "Superaquecimento"
+                    BatteryManager.BATTERY_HEALTH_DEAD -> "Ruim/Descartada"
+                    BatteryManager.BATTERY_HEALTH_OVER_VOLTAGE -> "Sobretensão"
+                    BatteryManager.BATTERY_HEALTH_COLD -> "Frio"
+                    else -> "Indefinida"
+                }
+                val tempStr = if (temp >= 0) String.format("%.1f °C", temp / 10.0) else "Indisponível"
+                battBody?.text = String.format(
+                    "Nível: %d%%\nStatus: %s\nConexão: %s\nSaúde: %s\nTemperatura: %s",
+                    pct,
+                    statusStr,
+                    pluggedStr,
+                    healthStr,
+                    tempStr
+                )
+            } else {
+                battBody?.text = "Indisponível\nLimitação: Dados de bateria não fornecidos pelo sistema neste dispositivo"
+            }
+        } else {
+            battBody?.text = "Indisponível\nLimitação: Não foi possível obter Intent.ACTION_BATTERY_CHANGED"
+        }
+
+        // Armazenamento
+        val storBody = getDiagBody("Armazenamento")
+        try {
+            val dataDir = Environment.getDataDirectory()
+            val stat = StatFs(dataDir.path)
+            val blockSize = if (Build.VERSION.SDK_INT >= 18) stat.blockSizeLong else stat.blockSize.toLong()
+            val totalBlocks = if (Build.VERSION.SDK_INT >= 18) stat.blockCountLong else stat.blockCount.toLong()
+            val availBlocks = if (Build.VERSION.SDK_INT >= 18) stat.availableBlocksLong else stat.availableBlocks.toLong()
+            val total = totalBlocks * blockSize
+            val avail = availBlocks * blockSize
+            val used = total - avail
+            if (total > 0) {
+                val totalGb = total / (1024.0 * 1024.0 * 1024.0)
+                val usedGb = used / (1024.0 * 1024.0 * 1024.0)
+                val availGb = avail / (1024.0 * 1024.0 * 1024.0)
+                storBody?.text = String.format(
+                    "Interno (dados)\nTotal: %.2f GB\nUsado: %.2f GB\nLivre: %.2f GB",
+                    totalGb,
+                    usedGb,
+                    availGb
+                )
+            } else {
+                storBody?.text = "Indisponível\nLimitação: StatFs não retornou valores válidos"
+            }
+        } catch (e: Exception) {
+            storBody?.text = "Indisponível\nLimitação: Falha ao acessar informações de armazenamento via APIs disponíveis"
+        }
+
+        // Tempo de atividade
+        val upBody = getDiagBody("Tempo de atividade")
+        try {
+            val uptimeMs = SystemClock.elapsedRealtime()
+            val seconds = (uptimeMs / 1000) % 60
+            val minutes = (uptimeMs / (1000 * 60)) % 60
+            val hours = (uptimeMs / (1000 * 60 * 60)) % 24
+            val days = (uptimeMs / (1000 * 60 * 60 * 24))
+            upBody?.text = String.format("Ligado há: %d dias, %02d:%02d:%02d", days, hours, minutes, seconds)
+        } catch (e: Exception) {
+            upBody?.text = "Indisponível\nLimitação: SystemClock.elapsedRealtime() indisponível"
+        }
+
+        // Sistema avançado
+        val sysBody = getDiagBody("Sistema avançado")
+        try {
+            val abi = if (Build.VERSION.SDK_INT >= 21) {
+                Build.SUPPORTED_ABIS.joinToString(", ")
+            } else {
+                @Suppress("DEPRECATION")
+                listOf(Build.CPU_ABI, Build.CPU_ABI2).filter { it.isNotEmpty() }.joinToString(", ")
+            }
+            sysBody?.text = String.format(
+                "Fabricante: %s\nModelo: %s\nDispositivo: %s\nProduto: %s\nAndroid: %s (API %d)\nBuild: %s\nABI: %s",
+                Build.MANUFACTURER,
+                Build.MODEL,
+                Build.DEVICE,
+                Build.PRODUCT,
+                Build.VERSION.RELEASE,
+                Build.VERSION.SDK_INT,
+                Build.DISPLAY,
+                abi
+            )
+        } catch (e: Exception) {
+            sysBody?.text = "Indisponível\nLimitação: Informações de Build indisponíveis"
+        }
+
+        // Limitações
+        val limBody = getDiagBody("Limitações")
+        limBody?.text = "• Somente dados reais obtidos via APIs Android disponíveis.\n• Nenhuma permissão especial foi adicionada.\n• Valores podem variar conforme ROM/dispositivo.\n• Alguns campos podem aparecer como 'Indisponível' se não suportados."
+
+        if (currentPage == 1 && isResumed) {
+            diagnosticsHandler.removeCallbacks(diagnosticsUpdateRunnable)
+            diagnosticsHandler.postDelayed(diagnosticsUpdateRunnable, 2000)
+        }
+    }
 }
