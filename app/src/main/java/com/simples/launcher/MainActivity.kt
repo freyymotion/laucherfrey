@@ -371,7 +371,7 @@ class MainActivity : Activity() {
                     } else {
                         pendingWallpaperUri = uri
                         pendingWallpaperIsGif = false
-                        showWallpaperPreview(bitmap)
+                        showWallpaperPreview(BitmapDrawable(resources, bitmap))
                     }
                 }
             }
@@ -728,7 +728,7 @@ class MainActivity : Activity() {
                 }
             }
 
-            val drawable = if (isGif) {
+            val drawable: Drawable? = if (isGif) {
                 runCatching {
                     if (Build.VERSION.SDK_INT >= 28) {
                         val source = ImageDecoder.createSource(source)
@@ -739,7 +739,7 @@ class MainActivity : Activity() {
                 }.getOrNull()
             } else if (isValidWallpaper(source)) {
                 runCatching {
-                    decodeBounded { source.inputStream() }
+                    decodeBounded { source.inputStream() }?.let { BitmapDrawable(resources, it) }
                 }.getOrNull()
             } else {
                 null
