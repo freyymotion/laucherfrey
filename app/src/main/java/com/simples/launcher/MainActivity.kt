@@ -12,14 +12,18 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.BitmapDrawable
 import android.graphics.Matrix
+import android.graphics.Movie
+import android.graphics.Paint
+import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.Typeface
+import android.graphics.drawable.Animatable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.media.ExifInterface
-import android.net.Uri
-import android.os.BatteryManager
-import android.os.Build
+import android.media.ImageDecoder
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
@@ -109,6 +113,9 @@ class MainActivity : Activity() {
     private val diagnosticsUpdateRunnable = Runnable { updateDiagnostics() }
     private var diagnosticsVisible = false
     private var isActivityResumed = false
+    private var animatedWallpaper: Drawable? = null
+    private var pendingWallpaperUri: Uri? = null
+    private var pendingWallpaperIsGif = false
 
     private val wallpaperExecutor = Executors.newSingleThreadExecutor()
     private var wallpaperVersion = 0
@@ -194,6 +201,9 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         isActivityResumed = true
+        if (animatedWallpaper is Animatable) {
+            (animatedWallpaper as Animatable).start()
+        }
         if (::pagesContainer.isInitialized && currentPage == 1) {
             diagnosticsVisible = true
             updateDiagnostics()
@@ -204,6 +214,9 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         isActivityResumed = false
+        if (animatedWallpaper is Animatable) {
+            (animatedWallpaper as Animatable).stop()
+        }
         diagnosticsHandler.removeCallbacks(diagnosticsUpdateRunnable)
         diagnosticsVisible = false
         super.onPause()
@@ -223,6 +236,13 @@ class MainActivity : Activity() {
         repo.clearIconListener()
         repo.clearAppsListener()
         repo.close()
+        
+        // Stop and release wallpaper animation
+        if (animatedWallpaper is Animatable) {
+            (animatedWallpaper as Animatable).stop()
+        }
+        animatedWallpaper = null
+        
         super.onDestroy()
     }
 
@@ -287,23 +307,76 @@ class MainActivity : Activity() {
         toast("Nenhum seletor de imagens disponível")
     }
 
+    private fun chooseGif() {
+        val targets = mutableListOf<Intent>()
+        if (Build.VERSION.SDK_INT >= 33) {
+            targets.add(Intent(MediaStore.ACTION_PICK_IMAGES).setType("image/gif"))
+        }
+        targets.add(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "image/gif"
+        })
+        for (intent in targets) {
+            if (runCatching { startActivityForResult(intent, REQ_WALLPAPER) }.isSuccess) return
+        }
+        toast("Nenhum seletor de GIF disponível")
+    }
+
     private fun previewWallpaper(uri: Uri) {
         val version = ++previewVersion
+        val isGif = isGifUri(uri)
         wallpaperExecutor.execute {
-            val decoded = runCatching {
-                decodeBounded { contentResolver.openInputStream(uri) }
-            }.getOrNull()
-            val bitmap = if (decoded == null) null else runCatching {
-                orientWallpaper(uri, decoded)
-            }.getOrDefault(decoded)
-            runOnUiThread {
-                if (isFinishing || isDestroyed || version != previewVersion) {
-                    bitmap?.recycle()
-                    return@runOnUiThread
+            if (isGif) {
+                val drawable = runCatching {
+                    decodeGif(uri)
+                }.getOrNull()
+                runOnUiThread {
+                    if (isFinishing || isDestroyed || version != previewVersion) {
+                        if (drawable is Animatable) drawable.stop()
+                        return@runOnUiThread
+                    }
+                    if (drawable == null) {
+                        toast("Não foi possível carregar o GIF")
+                        pendingWallpaperUri = null
+                        pendingWallpaperIsGif = false
+                    } else {
+                        pendingWallpaperUri = uri
+                        pendingWallpaperIsGif = true
+                        showWallpaperPreview(drawable)
+                    }
                 }
-                if (bitmap == null) toast("Não foi possível carregar a imagem")
-                else showWallpaperPreview(bitmap)
+            } else {
+                val decoded = runCatching {
+                    decodeBounded { contentResolver.openInputStream(uri) }
+                }.getOrNull()
+                val bitmap = if (decoded == null) null else runCatching {
+                    orientWallpaper(uri, decoded)
+                }.getOrDefault(decoded)
+                runOnUiThread {
+                    if (isFinishing || isDestroyed || version != previewVersion) {
+                        bitmap?.recycle()
+                        return@runOnUiThread
+                    }
+                    if (bitmap == null) {
+                        toast("Não foi possível carregar a imagem")
+                        pendingWallpaperUri = null
+                        pendingWallpaperIsGif = false
+                    } else {
+                        pendingWallpaperUri = uri
+                        pendingWallpaperIsGif = false
+                        showWallpaperPreview(bitmap)
+                    }
+                }
             }
+        }
+    }
+
+    private fun isGifUri(uri: Uri): Boolean {
+        return try {
+            val mime = contentResolver.getType(uri)
+            mime?.let { it == "image/gif" } ?: uri.lastPathSegment?.lowercase()?.endsWith(".gif") == true
+        } catch (e: Exception) {
+            uri.lastPathSegment?.lowercase()?.endsWith(".gif") == true
         }
     }
 
@@ -357,11 +430,11 @@ class MainActivity : Activity() {
         return bitmap
     }
 
-    private fun showWallpaperPreview(bitmap: Bitmap) {
+    private fun showWallpaperPreview(drawable: Drawable) {
         var applied = false
         val preview = ImageView(this).apply {
             scaleType = ImageView.ScaleType.FIT_CENTER
-            setImageBitmap(bitmap)
+            setImageDrawable(drawable)
         }
         val box = FrameLayout(this).apply {
             setPadding(dp(16), dp(8), dp(16), 0)
@@ -375,14 +448,22 @@ class MainActivity : Activity() {
             .setView(box)
             .setPositiveButton("Aplicar") { _, _ ->
                 applied = true
-                applyWallpaper(bitmap)
+                applyWallpaper(drawable)
             }
             .setNegativeButton("Cancelar", null)
             .create()
         dialog.setOnDismissListener {
             if (!applied) {
                 preview.setImageDrawable(null)
-                if (!bitmap.isRecycled) bitmap.recycle()
+                if (drawable is BitmapDrawable) {
+                    val bmp = drawable.bitmap
+                    if (!bmp.isRecycled) bmp.recycle()
+                } else if (drawable is Animatable) {
+                    drawable.stop()
+                }
+                // Clear pending URI on cancel/dismiss
+                pendingWallpaperUri = null
+                pendingWallpaperIsGif = false
             }
         }
         dialog.show()
@@ -399,26 +480,143 @@ class MainActivity : Activity() {
         }.getOrDefault(false)
     }
 
-    private fun applyWallpaper(bitmap: Bitmap) {
+    private fun isGifFile(file: File): Boolean {
+        if (!file.isFile || file.length() <= 0L) return false
+        val name = file.name.lowercase()
+        if (name.endsWith(".gif")) return true
+        return try {
+            file.inputStream().use { stream ->
+                val header = ByteArray(6)
+                stream.read(header)
+                val headerStr = String(header, Charsets.US_ASCII)
+                headerStr.startsWith("GIF87a") || headerStr.startsWith("GIF89a")
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun decodeGif(uri: Uri): Drawable? {
+        return if (Build.VERSION.SDK_INT >= 28) {
+            runCatching {
+                val source = ImageDecoder.createSource(contentResolver, uri)
+                ImageDecoder.decodeDrawable(source)
+            }.getOrNull()
+        } else {
+            runCatching {
+                contentResolver.openInputStream(uri)?.use { stream ->
+                    val tempFile = File(filesDir, "temp_wallpaper.gif")
+                    tempFile.outputStream().use { output ->
+                        stream.copyTo(output)
+                    }
+                    MovieDrawable(tempFile.absolutePath)
+                }
+            }.getOrNull()
+        }
+    }
+
+    private inner class MovieDrawable(private val filePath: String) : Drawable(), Animatable {
+        private val movie = Movie.decodeFile(filePath)
+        private var startTime = 0L
+        private var running = false
+        private val paint = Paint()
+
+        override fun draw(canvas: Canvas) {
+            if (movie == null || !running) return
+            val dstRect = Rect()
+            copyBounds(dstRect)
+            
+            // Protect against zero/empty bounds
+            if (dstRect.isEmpty()) return
+            
+            // Calculate CENTER_CROP rect with protection against zero dimensions
+            val movieWidth = movie.width().toFloat()
+            val movieHeight = movie.height().toFloat()
+            if (movieWidth <= 0f || movieHeight <= 0f) return
+            
+            val viewWidth = dstRect.width().toFloat()
+            val viewHeight = dstRect.height().toFloat()
+            if (viewWidth <= 0f || viewHeight <= 0f) return
+            
+            val scale = maxOf(viewWidth / movieWidth, viewHeight / movieHeight)
+            val scaledWidth = movieWidth * scale
+            val scaledHeight = movieHeight * scale
+            val left = dstRect.centerX() - scaledWidth / 2
+            val top = dstRect.centerY() - scaledHeight / 2
+            
+            val dst = RectF(left, top, left + scaledWidth, top + scaledHeight)
+            
+            val now = SystemClock.uptimeMillis()
+            if (startTime == 0L) startTime = now
+            val elapsed = now - startTime
+            val duration = movie.duration()
+            if (duration > 0) {
+                val relTime = elapsed % duration
+                movie.setTime(relTime.toInt())
+            }
+            movie.draw(canvas, dst, paint)
+            
+            if (running) {
+                invalidateSelf()
+            }
+        }
+
+        override fun setAlpha(alpha: Int) { paint.alpha = alpha }
+        override fun setColorFilter(colorFilter: ColorFilter?) { paint.colorFilter = colorFilter }
+        override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+        override fun getIntrinsicWidth(): Int = movie?.width() ?: 0
+        override fun getIntrinsicHeight(): Int = movie?.height() ?: 0
+
+        override fun start() {
+            running = true
+            startTime = 0L
+            invalidateSelf()
+        }
+
+        override fun stop() {
+            running = false
+        }
+
+        override fun isRunning(): Boolean = running
+    }
+
+    private fun applyWallpaper(drawable: Drawable) {
         val version = ++wallpaperVersion
+        val isGif = pendingWallpaperIsGif || drawable is MovieDrawable || (Build.VERSION.SDK_INT >= 28 && drawable is AnimatedImageDrawable)
 
         wallpaperExecutor.execute {
-            val target = File(filesDir, WALLPAPER_FILE)
-            val temp = File(filesDir, "$WALLPAPER_FILE.tmp")
-            val backup = File(filesDir, "$WALLPAPER_FILE.bak")
-            val backupTemp = File(filesDir, "$WALLPAPER_FILE.bak.tmp")
+            val extension = if (isGif) ".gif" else ".jpg"
+            val target = File(filesDir, "wallpaper$extension")
+            val temp = File(filesDir, "wallpaper$extension.tmp")
+            val backup = File(filesDir, "wallpaper$extension.bak")
+            val backupTemp = File(filesDir, "wallpaper$extension.bak.tmp")
 
-            var saved = runCatching {
-                FileOutputStream(temp).use { out ->
-                    val compressed = bitmap.compress(
-                        Bitmap.CompressFormat.JPEG, 92, out
-                    )
-                    out.flush()
-                    compressed && temp.length() > 0L
-                }
-            }.getOrDefault(false)
+            var saved = false
+            if (isGif && pendingWallpaperUri != null) {
+                // Save GIF original file from URI
+                saved = runCatching {
+                    contentResolver.openInputStream(pendingWallpaperUri!!)?.use { input ->
+                        FileOutputStream(temp).use { output ->
+                            input.copyTo(output)
+                            output.flush()
+                        }
+                    }
+                    temp.isFile && temp.length() > 0L
+                }.getOrDefault(false)
+            } else if (drawable is BitmapDrawable) {
+                val bitmap = drawable.bitmap
+                saved = runCatching {
+                    FileOutputStream(temp).use { out ->
+                        val compressed = bitmap.compress(
+                            Bitmap.CompressFormat.JPEG, 92, out
+                        )
+                        out.flush()
+                        compressed && temp.length() > 0L
+                    }
+                }.getOrDefault(false)
+            }
 
-            if (saved && isValidWallpaper(target)) {
+            if (saved && (isValidWallpaper(target) || isGifFile(target))) {
                 val copied = runCatching {
                     target.inputStream().use { input ->
                         backupTemp.outputStream().use { output ->
@@ -426,7 +624,7 @@ class MainActivity : Activity() {
                             output.flush()
                         }
                     }
-                    isValidWallpaper(backupTemp)
+                    isValidWallpaper(backupTemp) || isGifFile(backupTemp)
                 }.getOrDefault(false)
 
                 if (!copied) {
@@ -439,7 +637,6 @@ class MainActivity : Activity() {
                     saved = false
                 }
             } else if (saved && target.exists()) {
-                // Não substitui um backup válido por uma imagem inválida.
                 if (!target.delete()) saved = false
             }
 
@@ -447,13 +644,8 @@ class MainActivity : Activity() {
                 saved = false
             }
 
-            // Se a instalação falhar, tenta recuperar a imagem anterior.
-            if (!saved && isValidWallpaper(backup) &&
-                !isValidWallpaper(target)
-            ) {
-                runCatching {
-                    backup.copyTo(target, overwrite = true)
-                }
+            if (!saved && (isValidWallpaper(backup) || isGifFile(backup)) && !(isValidWallpaper(target) || isGifFile(target))) {
+                runCatching { backup.copyTo(target, overwrite = true) }
             }
 
             if (temp.exists()) temp.delete()
@@ -461,20 +653,26 @@ class MainActivity : Activity() {
 
             runOnUiThread {
                 if (isFinishing || isDestroyed || version != wallpaperVersion) {
-                    if (!bitmap.isRecycled) bitmap.recycle()
+                    if (drawable is BitmapDrawable && !drawable.bitmap.isRecycled) drawable.bitmap.recycle()
+                    if (drawable is Animatable) drawable.stop()
                     return@runOnUiThread
                 }
 
                 if (!saved) {
-                    if (!bitmap.isRecycled) bitmap.recycle()
-                    toast("Não foi possível salvar a imagem")
+                    if (drawable is BitmapDrawable && !drawable.bitmap.isRecycled) drawable.bitmap.recycle()
+                    if (drawable is Animatable) drawable.stop()
+                    toast("Não foi possível salvar")
                     return@runOnUiThread
                 }
 
                 FreyPrefs.setWallpaper(this, target.absolutePath)
-                showWallpaper(bitmap)
+                showWallpaper(drawable)
                 toast("Papel de parede aplicado")
             }
+
+            // Clear pending URI after use
+            pendingWallpaperUri = null
+            pendingWallpaperIsGif = false
         }
     }
 
@@ -487,21 +685,22 @@ class MainActivity : Activity() {
 
         val file = File(path)
         val version = wallpaperVersion
+        val isGif = isGifFile(file)
 
         wallpaperExecutor.execute {
             var source = file
 
-            if (!isValidWallpaper(source)) {
-                val backup = File(filesDir, "$WALLPAPER_FILE.bak")
-                val restoreTemp = File(filesDir, "$WALLPAPER_FILE.restore.tmp")
+            if (!isValidWallpaper(source) && !isGif) {
+                val backup = File(filesDir, if (isGifFile(File(filesDir, "wallpaper.gif"))) "wallpaper.gif.bak" else "wallpaper.jpg.bak")
+                val restoreTemp = File(filesDir, if (isGifFile(File(filesDir, "wallpaper.gif"))) "wallpaper.gif.restore.tmp" else "wallpaper.jpg.restore.tmp")
 
-                if (isValidWallpaper(backup)) {
+                if (isValidWallpaper(backup) || isGifFile(backup)) {
                     val restored = runCatching {
                         if (restoreTemp.exists()) restoreTemp.delete()
 
                         backup.copyTo(restoreTemp, overwrite = true)
 
-                        if (!isValidWallpaper(restoreTemp)) {
+                        if (!isValidWallpaper(restoreTemp) && !isGifFile(restoreTemp)) {
                             restoreTemp.delete()
                             false
                         } else {
@@ -514,7 +713,7 @@ class MainActivity : Activity() {
                         }
                     }.getOrDefault(false)
 
-                    if (restored && isValidWallpaper(file)) {
+                    if (restored && (isValidWallpaper(file) || isGifFile(file))) {
                         source = file
                     } else {
                         source = backup
@@ -522,7 +721,16 @@ class MainActivity : Activity() {
                 }
             }
 
-            val bitmap = if (isValidWallpaper(source)) {
+            val drawable = if (isGif) {
+                runCatching {
+                    if (Build.VERSION.SDK_INT >= 28) {
+                        val source = ImageDecoder.createSource(source)
+                        ImageDecoder.decodeDrawable(source)
+                    } else {
+                        MovieDrawable(source.absolutePath)
+                    }
+                }.getOrNull()
+            } else if (isValidWallpaper(source)) {
                 runCatching {
                     decodeBounded { source.inputStream() }
                 }.getOrNull()
@@ -532,16 +740,17 @@ class MainActivity : Activity() {
 
             runOnUiThread {
                 if (isFinishing || isDestroyed || version != wallpaperVersion) {
-                    bitmap?.recycle()
+                    if (drawable is Animatable) drawable.stop()
+                    if (drawable is BitmapDrawable && !drawable.bitmap.isRecycled) drawable.bitmap.recycle()
                     return@runOnUiThread
                 }
 
-                if (bitmap == null) {
+                if (drawable == null) {
                     FreyPrefs.setWallpaper(this, null)
                     showDefaultBackground()
                 } else {
                     FreyPrefs.setWallpaper(this, source.absolutePath)
-                    showWallpaper(bitmap)
+                    showWallpaper(drawable)
                 }
             }
         }
@@ -551,16 +760,28 @@ class MainActivity : Activity() {
         ++wallpaperVersion
         ++previewVersion
 
+        // Stop current animation if any
+        if (animatedWallpaper is Animatable) {
+            (animatedWallpaper as Animatable).stop()
+        }
+        animatedWallpaper = null
+
         FreyPrefs.setWallpaper(this, null)
         showDefaultBackground()
 
         wallpaperExecutor.execute {
             val files = listOf(
-                File(filesDir, WALLPAPER_FILE),
-                File(filesDir, "$WALLPAPER_FILE.tmp"),
-                File(filesDir, "$WALLPAPER_FILE.bak"),
-                File(filesDir, "$WALLPAPER_FILE.bak.tmp"),
-                File(filesDir, "$WALLPAPER_FILE.restore.tmp")
+                File(filesDir, "wallpaper.jpg"),
+                File(filesDir, "wallpaper.jpg.tmp"),
+                File(filesDir, "wallpaper.jpg.bak"),
+                File(filesDir, "wallpaper.jpg.bak.tmp"),
+                File(filesDir, "wallpaper.jpg.restore.tmp"),
+                File(filesDir, "wallpaper.gif"),
+                File(filesDir, "wallpaper.gif.tmp"),
+                File(filesDir, "wallpaper.gif.bak"),
+                File(filesDir, "wallpaper.gif.bak.tmp"),
+                File(filesDir, "wallpaper.gif.restore.tmp"),
+                File(filesDir, "temp_wallpaper.gif")
             )
 
             val deleted = files.all { file ->
@@ -579,11 +800,26 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun showWallpaper(bitmap: Bitmap) {
+    private fun showWallpaper(drawable: Drawable) {
         if (!::wallpaperView.isInitialized) return
-        wallpaperView.setImageBitmap(bitmap)
+
+        // Stop previous animation
+        if (animatedWallpaper is Animatable) {
+            (animatedWallpaper as Animatable).stop()
+        }
+
+        // Configure scale type for CENTER_CROP behavior
+        wallpaperView.scaleType = ImageView.ScaleType.CENTER_CROP
+        wallpaperView.setImageDrawable(drawable)
+        animatedWallpaper = drawable
+
         wallpaperView.visibility = View.VISIBLE
         wallpaperScrim.visibility = View.VISIBLE
+
+        // Start animation if it's a GIF and activity is resumed
+        if (isActivityResumed && drawable is Animatable) {
+            drawable.start()
+        }
     }
 
     private fun showDefaultBackground() {
@@ -1349,6 +1585,7 @@ class MainActivity : Activity() {
             },
             onRequestDefault = { requestDefaultLauncher() },
             onPickWallpaper = { chooseWallpaper() },
+            onPickGif = { chooseGif() },
             onClearWallpaper = { clearCustomWallpaper() },
             onClose = { closeSettings() }
         ).also { panel ->

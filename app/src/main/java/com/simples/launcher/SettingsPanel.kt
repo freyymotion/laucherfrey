@@ -28,6 +28,7 @@ class SettingsPanel(
     private val onThemeSelected: (ThemeId) -> Unit,
     private val onRequestDefault: () -> Unit,
     private val onPickWallpaper: () -> Unit,
+    private val onPickGif: () -> Unit,
     private val onClearWallpaper: () -> Unit,
     private val onClose: () -> Unit
 ) {
@@ -129,12 +130,21 @@ class SettingsPanel(
             setPadding(0, dp(18), 0, dp(6))
         })
 
-        card.addView(label("Escolher imagem", 15f, palette.text).apply {
+        card.addView(label("Adicionar imagem", 15f, palette.text).apply {
             gravity = Gravity.CENTER
             setPadding(dp(16), dp(13), dp(16), dp(13))
             background = panel(palette.surface, palette.accent, palette.radiusDp - 6)
             setOnClickListener { onPickWallpaper() }
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        card.addView(label("Adicionar GIF", 15f, palette.text).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(13), dp(16), dp(13))
+            background = panel(palette.surface, palette.accent, palette.radiusDp - 6)
+            setOnClickListener { onPickGif() }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)).apply {
+            setPadding(0, dp(8), 0, 0)
+        }
 
         card.addView(label("Usar fundo padrão", 13f, palette.textDim).apply {
             gravity = Gravity.CENTER
