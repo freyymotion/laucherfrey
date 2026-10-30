@@ -12,25 +12,24 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.BitmapDrawable
+import android.graphics.Canvas
+import android.graphics.ColorFilter
+import android.graphics.ImageDecoder
 import android.graphics.Matrix
 import android.graphics.Movie
 import android.graphics.Paint
+import android.graphics.PixelFormat
 import android.graphics.Rect
-import android.graphics.RectF
 import android.graphics.Typeface
+import android.graphics.drawable.AnimatedImageDrawable
 import android.graphics.drawable.Animatable
+import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.media.ExifInterface
-import android.graphics.ImageDecoder
 import android.net.Uri
-import android.os.Build
-import android.graphics.Canvas
-import android.graphics.ColorFilter
-import android.graphics.PixelFormat
 import android.os.BatteryManager
-import android.graphics.drawable.AnimatedImageDrawable
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
@@ -551,8 +550,6 @@ class MainActivity : Activity() {
             val left = dstRect.centerX() - scaledWidth / 2
             val top = dstRect.centerY() - scaledHeight / 2
             
-            val dst = RectF(left, top, left + scaledWidth, top + scaledHeight)
-            
             val now = SystemClock.uptimeMillis()
             if (startTime == 0L) startTime = now
             val elapsed = now - startTime
@@ -561,7 +558,11 @@ class MainActivity : Activity() {
                 val relTime = elapsed % duration
                 movie.setTime(relTime.toInt())
             }
-            movie.draw(canvas, dst.left, dst.top, paint)
+            canvas.save()
+            canvas.translate(left, top)
+            canvas.scale(scale, scale)
+            movie.draw(canvas, 0f, 0f, paint)
+            canvas.restore()
             
             if (running) {
                 invalidateSelf()
@@ -739,8 +740,8 @@ class MainActivity : Activity() {
                 }.getOrNull()
             } else if (isValidWallpaper(source)) {
                 runCatching {
-                    decodeBounded { source.inputStream() }?.let { BitmapDrawable(resources, it) }
-                }.getOrNull()
+                    decodeBounded { source.inputStream() }
+                }.getOrNull()?.let { BitmapDrawable(resources, it) }
             } else {
                 null
             }
