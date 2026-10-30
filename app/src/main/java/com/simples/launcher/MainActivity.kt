@@ -961,7 +961,6 @@ class MainActivity : Activity() {
             }
         }
     }
-    }
 
     private inner class AppGridAdapter : BaseAdapter() {
         override fun getCount(): Int = apps.size
