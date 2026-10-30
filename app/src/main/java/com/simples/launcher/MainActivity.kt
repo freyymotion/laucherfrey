@@ -108,6 +108,7 @@ class MainActivity : Activity() {
     private val diagnosticsHandler = Handler(Looper.getMainLooper())
     private val diagnosticsUpdateRunnable = Runnable { updateDiagnostics() }
     private var diagnosticsVisible = false
+    private var isActivityResumed = false
 
     private val wallpaperExecutor = Executors.newSingleThreadExecutor()
     private var wallpaperVersion = 0
@@ -192,6 +193,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        isActivityResumed = true
         if (::pagesContainer.isInitialized && currentPage == 1) {
             diagnosticsVisible = true
             updateDiagnostics()
@@ -201,6 +203,7 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        isActivityResumed = false
         diagnosticsHandler.removeCallbacks(diagnosticsUpdateRunnable)
         diagnosticsVisible = false
         super.onPause()
@@ -1658,7 +1661,7 @@ class MainActivity : Activity() {
             setOnClickListener {
                 diagnosticsHandler.removeCallbacks(diagnosticsUpdateRunnable)
                 updateDiagnostics()
-                if (currentPage == 1 && isResumed) {
+                if (currentPage == 1 && isActivityResumed) {
                     diagnosticsHandler.postDelayed(diagnosticsUpdateRunnable, 2000)
                 }
             }
@@ -1755,7 +1758,7 @@ class MainActivity : Activity() {
 
     private fun updateDiagnostics() {
         if (!::diagnosticsContent.isInitialized) return
-        if (!isResumed && !diagnosticsVisible) return
+        if (!isActivityResumed && !diagnosticsVisible) return
 
         // Memória RAM
         val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -1895,7 +1898,7 @@ class MainActivity : Activity() {
         val limBody = getDiagBody("Limitações")
         limBody?.text = "• Somente dados reais obtidos via APIs Android disponíveis.\n• Nenhuma permissão especial foi adicionada.\n• Valores podem variar conforme ROM/dispositivo.\n• Alguns campos podem aparecer como 'Indisponível' se não suportados."
 
-        if (currentPage == 1 && isResumed) {
+        if (currentPage == 1 && isActivityResumed) {
             diagnosticsHandler.removeCallbacks(diagnosticsUpdateRunnable)
             diagnosticsHandler.postDelayed(diagnosticsUpdateRunnable, 2000)
         }
